@@ -31,7 +31,7 @@ class ModalDetectedException(Exception):
 class XBot:
     def __init__(self, api_key, model, max_posts, max_comments, view_threshold,
                  gemini_api_key=None, deepseek_api_key=None, deepseek_base_url=None,
-                 comment_strategy="Reply to Post", min_comment_views=1000):
+                 comment_strategy="Reply to Post", min_comment_views=1000, custom_prompt=""):
         self.api_key = api_key
         self.gemini_api_key = gemini_api_key
         self.deepseek_api_key = deepseek_api_key
@@ -42,6 +42,7 @@ class XBot:
         self.view_threshold = view_threshold
         self.comment_strategy = comment_strategy
         self.min_comment_views = min_comment_views
+        self.custom_prompt = custom_prompt
 
         if "gpt" in model:
             self.client = openai.OpenAI(api_key=api_key)
@@ -111,18 +112,15 @@ class XBot:
     # Internal prompt builders
     # ------------------------------------------------------------------
 
-    _VARIANT_PROMPT_SUFFIX = """
-
+    _FIXED_PROMPT_PART = """
 OUTPUT FORMAT — follow EXACTLY:
 - Output exactly 5 replies, each on its own line.
 - Prefix each line with its number and a pipe: "1| ", "2| ", "3| ", ...
-- Each reply ≤ 310 characters.
-- Replies must be in the SAME LANGUAGE as the post / comments provided.
-- Tone: natural, human — slight typos allowed — humorous / professional / viral as fits.
-- Content: light analysis of the post with an expert-like, engaging angle.
-- Avoid sensitive, harmful, or policy-violating language.
-- Goal: maximize views (10k+) and shareability.
 - No markdown, no preamble, no explanation — ONLY the 5 numbered lines."""
+
+    def _get_full_prompt_suffix(self):
+        """Combine the fixed format prompt with the user's custom instructions."""
+        return f"\n\n{self.custom_prompt}\n\n{self._FIXED_PROMPT_PART}"
 
     def _parse_variants(self, raw: str) -> list[str]:
         """Parse 5 pipe-prefixed reply lines from AI output into a clean list."""
@@ -158,7 +156,7 @@ OUTPUT FORMAT — follow EXACTLY:
                 f'You are an engaging social media user on X (Twitter).\n'
                 f'Post: "{post_text[:800]}"\n'
                 f'Generate 5 replies to this post.'
-                + self._VARIANT_PROMPT_SUFFIX
+                + self._get_full_prompt_suffix()
             )
             raw = self._call_ai(prompt)
             if not raw:
@@ -189,7 +187,7 @@ OUTPUT FORMAT — follow EXACTLY:
                 f'Post: "{post_text[:500]}"\n\n'
                 f'Top comments (for style/tone reference ONLY):\n{comments_block}\n\n'
                 f'Generate 5 replies that match the tone and style of those top comments.'
-                + self._VARIANT_PROMPT_SUFFIX
+                + self._get_full_prompt_suffix()
             )
             raw = self._call_ai(prompt)
             if not raw:
@@ -767,11 +765,30 @@ OUTPUT FORMAT — follow EXACTLY:
 
                 # Type with human-like delays
                 page.keyboard.type(reply_text, delay=random.randint(30, 80))
-                time.sleep(random.uniform(1, 2))
+                time.sleep(1)
+
+                # If the last word is a mention or hashtag (e.g. @abc, #bill), 
+                # it will likely trigger an autocomplete dropdown that can block the Reply button.
+                words = reply_text.strip().split()
+                if words and (words[-1].startswith('@') or words[-1].startswith('#')):
+                    logger.info(f"Last word '{words[-1]}' detected as mention/hashtag, ensuring dropdown is dismissed.")
+                    # Adding a space is a reliable way to 'confirm' the text and close the dropdown
+                    page.keyboard.type(" ")
+                    time.sleep(0.5)
+
+                # Explicitly check for and dismiss any visible autocomplete dropdowns
+                try:
+                    # X uses role="listbox" or data-testid="TypeaheadUserSuggestions" for mentions/hashtags
+                    typeahead = page.query_selector('[role="listbox"], [data-testid="TypeaheadUserSuggestions"]')
+                    if typeahead and typeahead.is_visible():
+                        logger.info("Autocomplete dropdown detected, dismissing with Escape.")
+                        page.keyboard.press("Escape")
+                        time.sleep(0.5)
+                        # Ensure Escape didn't trigger 'Discard post?' modal if the dropdown wasn't truly capturing it
+                        self._handle_modals(page)
+                except:
+                    pass
                 
-                # NO Escape key here - it triggers "Discard post?" modal.
-                # Instead, we will use a forced click on the Reply button to bypass 
-                # any autocomplete dropdowns that might be blocking it.
                 time.sleep(1)
 
 
@@ -788,11 +805,31 @@ OUTPUT FORMAT — follow EXACTLY:
                     time.sleep(random.uniform(0.5, 1.5))
                     
                     try:
+                        # Check if the button is aria-disabled (sometimes happens when autocomplete is active)
+                        is_disabled = page.evaluate("el => el.getAttribute('aria-disabled') === 'true' || el.disabled", send_button)
+                        if is_disabled:
+                            logger.info("Send button is disabled, trying to refresh state with Tab/Shift+Tab and space/backspace...")
+                            # Force focus change to trigger UI update
+                            page.keyboard.press("Tab")
+                            time.sleep(0.3)
+                            page.keyboard.press("Shift+Tab")
+                            time.sleep(0.3)
+                            # Standard state refresh
+                            page.keyboard.type(" ")
+                            time.sleep(0.3)
+                            page.keyboard.press("Backspace")
+                            time.sleep(0.5)
+
                         # Use force=True to click even if obscured by an autocomplete dropdown
                         send_button.click(force=True, timeout=5000)
-                    except Exception:
-                        # Fallback to JS click if Playwright's force-click still fails
-                        page.evaluate("el => el.click()", send_button)
+                    except Exception as e:
+                        logger.warning(f"Click failed, trying fallback: {e}")
+                        # Fallback 1: JS click
+                        try:
+                            page.evaluate("el => el.click()", send_button)
+                        except:
+                            # Fallback 2: Keyboard shortcut
+                            page.keyboard.press("Control+Enter")
                         
                     time.sleep(3)
 

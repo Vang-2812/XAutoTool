@@ -15,6 +15,14 @@ def load_settings():
         "view_threshold": 1000,
         "comment_strategy": "Reply to Post",
         "min_comment_views": 1000,
+        "custom_prompt": (
+            "- Each reply ≤ 310 characters.\n"
+            "- Replies must be in the SAME LANGUAGE as the post / comments provided.\n"
+            "- Tone: natural, human — slight typos allowed — humorous / professional / viral as fits.\n"
+            "- Content: light analysis of the post with an expert-like, engaging angle.\n"
+            "- Avoid sensitive, harmful, or policy-violating language.\n"
+            "- Goal: maximize views (10k+) and shareability."
+        ),
     }
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, "r") as f:

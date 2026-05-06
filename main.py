@@ -38,6 +38,7 @@ st.session_state.settings.setdefault("comment_strategy", "Reply to Post")
 st.session_state.settings.setdefault("min_comment_views", 1000)
 st.session_state.settings.setdefault("deepseek_api_key", "")
 st.session_state.settings.setdefault("deepseek_base_url", "https://ds2api-peach-two.vercel.app/v1")
+st.session_state.settings.setdefault("custom_prompt", "")
 
 # Helper to update status from thread
 def update_status(text):
@@ -56,7 +57,7 @@ with st.sidebar:
     deepseek_key = st.text_input("DeepSeek API Key", value=st.session_state.settings["deepseek_api_key"], type="password")
     deepseek_url = st.text_input("DeepSeek Base URL", value=st.session_state.settings["deepseek_base_url"])
     
-    models = ["gpt-4o", "gpt-4o-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "deepseek-v4-flash", "deepseek-v4-pro"]
+    models = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "deepseek-v4-flash", "deepseek-v4-pro"]
     current_model = st.session_state.settings["ai_model"]
     model_index = models.index(current_model) if current_model in models else 1
     model = st.selectbox("AI Model", models, index=model_index)
@@ -93,6 +94,16 @@ with st.sidebar:
         help="Mimic mode: only use comments with ≥ this many views.\nLatest-Active mode: skip post if the latest comment has fewer views than this.",
         disabled=(comment_strategy == "Reply to Post")
     )
+
+    st.divider()
+    st.markdown("**✍️ AI Content Prompt**")
+    st.caption("Customize the content/style instructions (Output format is fixed).")
+    custom_prompt_val = st.text_area(
+        "Instructions", 
+        value=st.session_state.settings["custom_prompt"],
+        height=180,
+        help="Add instructions like 'Tone: funny' or 'Keep it short'."
+    )
     # Auto-sync: always keep session_state and settings.json up to date
     # with whatever is currently shown in the sidebar (no Save button needed).
     _current = {
@@ -106,6 +117,7 @@ with st.sidebar:
         "view_threshold": int(view_threshold),
         "comment_strategy": comment_strategy,
         "min_comment_views": int(min_comment_views),
+        "custom_prompt": custom_prompt_val,
     }
     if _current != st.session_state.settings:
         st.session_state.settings = _current
@@ -167,6 +179,7 @@ with col1:
                     view_threshold=st.session_state.settings["view_threshold"],
                     comment_strategy=st.session_state.settings["comment_strategy"],
                     min_comment_views=st.session_state.settings["min_comment_views"],
+                    custom_prompt=st.session_state.settings["custom_prompt"],
                 )
                 
                 def run_bot():
