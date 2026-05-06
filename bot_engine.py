@@ -8,7 +8,8 @@ import google.genai as google_genai
 from db_manager import (
     log_interaction, get_posted_urls,
     save_reply_variants, mark_variant_posted,
-    get_next_variant, get_posts_with_pending_variants
+    get_next_variant, get_posts_with_pending_variants,
+    get_post_url_by_variant_text
 )
 import os
 import re
@@ -897,29 +898,51 @@ OUTPUT FORMAT — follow EXACTLY:
                 try:
                     # Get the canonical URL of this reply tweet
                     reply_url = self._extract_post_url(article)
-                    if not reply_url or reply_url in processed_reply_urls:
+                    if not reply_url:
                         continue
+                    
+                    if reply_url in processed_reply_urls:
+                        continue
+                        
                     processed_reply_urls.add(reply_url)
                     new_found += 1
+                    
+                    status_callback(f"🔍 [Re-Reply] Processing reply: ...{reply_url[-20:]}")
 
                     # Derive the original post URL.
                     # A reply tweet URL looks like: https://x.com/user/status/ID
                     # The parent post URL is stored in pending_post_urls.
-                    # We match by checking if this reply belongs to any queued post.
-                    # Strategy: look for a link inside the article that points to a pending post.
                     parent_url = None
                     links = article.query_selector_all("a[href*='/status/']") or []
                     for link in links:
                         href = link.get_attribute("href") or ""
+                        # Convert to full URL
                         candidate = ("https://x.com" + href) if href.startswith("/") else href
-                        # Normalise: strip trailing slash
-                        candidate = candidate.rstrip("/")
-                        if candidate in pending_post_urls and candidate != reply_url.rstrip("/"):
+                        # Canonicalize: strip query params, /analytics, etc.
+                        match = re.search(r"(https://x\.com/[^/]+/status/\d+)", candidate)
+                        if match:
+                            candidate = match.group(1)
+                        else:
+                            candidate = candidate.split('?')[0].rstrip("/")
+
+                        if candidate in pending_post_urls and candidate != reply_url:
                             parent_url = candidate
                             break
 
                     if not parent_url:
-                        continue  # This reply is not related to any pending post
+                        # Fallback: Extract text and look up in DB
+                        text_el = article.query_selector('[data-testid="tweetText"]')
+                        if text_el:
+                            reply_text_content = text_el.inner_text().strip()
+                            # Clean up the text (remove newlines, etc. to match DB)
+                            reply_text_content = reply_text_content.replace("\n", " ")
+                            parent_url = get_post_url_by_variant_text(reply_text_content)
+                            if parent_url:
+                                status_callback(f"🔗 [Re-Reply] Linked reply to parent via content match.")
+
+                    if not parent_url:
+                        # status_callback(f"⏭️ [Re-Reply] No queued parent found for reply ...{reply_url[-15:]}")
+                        continue
 
                     # Check the view count of THIS reply tweet
                     reply_views = self._extract_comment_view_count(page, article)

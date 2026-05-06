@@ -166,3 +166,20 @@ def get_posts_with_pending_variants() -> list[str]:
     conn.close()
     return [row[0] for row in rows]
 
+def get_post_url_by_variant_text(reply_text: str) -> str | None:
+    """
+    Search for a reply text in post_variants to find its parent post_url.
+    This is used as a fallback when the UI doesn't provide a direct link.
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # Use LIKE for minor whitespace differences, or exact match
+    cursor.execute("""
+        SELECT post_url FROM post_variants 
+        WHERE reply_text = ? OR reply_text LIKE ?
+        LIMIT 1
+    """, (reply_text, f"%{reply_text}%"))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else None
+
