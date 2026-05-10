@@ -1301,12 +1301,12 @@ OUTPUT FORMAT — follow EXACTLY:
                         preview = tweet_content[:60].replace("\n", " ")
 
                         if view_count < self.view_threshold:
-                            # 20% chance: like this post randomly even if below threshold
-                            if random.random() < 0.20:
+                            # 15% chance: like this post randomly even if below threshold
+                            if random.random() < 0.15:
                                 if self._try_like_post(page, post):
                                     status_callback(
                                         f"👍 [{posts_scanned}/{self.max_posts}] "
-                                        f"Liked a post randomly (human behavior)."
+                                        f"Liked a post randomly."
                                     )
                             status_callback(
                                 f"👁️ [{posts_scanned}/{self.max_posts}] "
@@ -1314,12 +1314,12 @@ OUTPUT FORMAT — follow EXACTLY:
                             )
                             continue
 
-                        # 20% chance: like the qualifying post before (or instead of) commenting
-                        if random.random() < 0.20:
+                        # 15% chance: like the qualifying post before (or instead of) commenting
+                        if random.random() < 0.15:
                             if self._try_like_post(page, post):
                                 status_callback(
                                     f"👍 [{posts_scanned}/{self.max_posts}] "
-                                    f"Liked qualifying post randomly (human behavior)."
+                                    f"Liked qualifying post."
                                 )
                         
                         # Check for Premium Account if enabled
