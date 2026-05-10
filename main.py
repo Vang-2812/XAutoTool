@@ -89,34 +89,80 @@ with st.sidebar:
     account_names = [f"{acc['name']} ({acc['id']})" for acc in settings["accounts"]]
     account_ids = [acc["id"] for acc in settings["accounts"]]
 
-    # Add Account
-    col_add, col_del = st.columns(2)
-    with col_add:
-        if st.button("➕ Add Account", use_container_width=True):
-            new_name = f"Account {len(settings['accounts']) + 1}"
-            settings, new_acc = add_account(settings, name=new_name)
-            st.session_state.settings = settings
-            st.rerun()
-    with col_del:
-        if st.button("🗑️ Remove Last", use_container_width=True, disabled=len(settings["accounts"]) <= 1):
-            last_acc = settings["accounts"][-1]
-            settings = remove_account(settings, last_acc["id"])
-            st.session_state.settings = settings
-            st.rerun()
-
     # Select which account to configure
     selected_idx = st.selectbox(
-        "Configure Account",
+        "Select Account",
         range(len(account_names)),
         format_func=lambda i: account_names[i],
         key="config_account_select"
     )
     acc = settings["accounts"][selected_idx]
 
+    # Add / Remove Account
+    col_add, col_del = st.columns(2)
+    with col_add:
+        if st.button("➕ Add New", use_container_width=True):
+            new_name = f"Account {len(settings['accounts']) + 1}"
+            settings, new_acc = add_account(settings, name=new_name)
+            st.session_state.settings = settings
+            st.rerun()
+    with col_del:
+        if st.button("🗑️ Remove Current", use_container_width=True, disabled=len(settings["accounts"]) <= 1):
+            st.session_state.show_confirm_delete = True
+
+    if st.session_state.get("show_confirm_delete"):
+        st.warning(f"Delete '{acc['name']}'?")
+        col_yes, col_no = st.columns(2)
+        with col_yes:
+            if st.button("✅ Yes, Delete", type="primary", use_container_width=True):
+                settings = remove_account(settings, acc["id"])
+                st.session_state.settings = settings
+                st.session_state.show_confirm_delete = False
+                st.rerun()
+        with col_no:
+            if st.button("❌ Cancel", use_container_width=True):
+                st.session_state.show_confirm_delete = False
+                st.rerun()
+
     st.divider()
 
     # --- Per-Account Settings ---
     st.markdown(f"**⚙️ Settings: {acc['name']}**")
+
+    # --- Copy Settings Feature ---
+    other_accounts = [a for a in settings["accounts"] if a["id"] != acc["id"]]
+    if other_accounts:
+        with st.expander("👯 Copy Settings from...", expanded=False):
+            copy_src_names = [f"{a['name']} ({a['id']})" for a in other_accounts]
+            selected_copy_src_idx = st.selectbox(
+                "Source Account",
+                range(len(copy_src_names)),
+                format_func=lambda i: copy_src_names[i],
+                key=f"copy_src_{acc['id']}"
+            )
+            if st.button("📋 Copy Now", key=f"copy_btn_{acc['id']}", use_container_width=True):
+                src_acc = other_accounts[selected_copy_src_idx]
+                # Copy all keys except id and name
+                for k in ACCOUNT_SETTING_KEYS:
+                    if k not in ["id", "name"]:
+                        acc[k] = src_acc.get(k, acc[k])
+                
+                # IMPORTANT: Also update session_state keys so widgets refresh immediately
+                aid = acc["id"]
+                st.session_state[f"model_{aid}"] = acc["ai_model"]
+                st.session_state[f"maxposts_{aid}"] = acc["max_posts_scan"]
+                st.session_state[f"maxcomments_{aid}"] = acc["max_comments_post"]
+                st.session_state[f"viewthresh_{aid}"] = acc["view_threshold"]
+                st.session_state[f"strategy_{aid}"] = acc["comment_strategy"]
+                st.session_state[f"minviews_{aid}"] = acc["min_comment_views"]
+                st.session_state[f"prompt_{aid}"] = acc["custom_prompt"]
+                st.session_state[f"premium_{aid}"] = acc["premium_only"]
+
+                # Update settings and save
+                settings["accounts"][selected_idx] = acc
+                st.session_state.settings = settings
+                save_settings(settings)
+                st.rerun()
 
     acc_name = st.text_input("Account Name", value=acc["name"], key=f"name_{acc['id']}")
 
@@ -200,7 +246,7 @@ with st.sidebar:
     if st.button("🔑 Setup X Session (Login)", key=f"login_{acc['id']}"):
         with st.spinner(f"Opening browser for {acc_name} login..."):
             start_login_session(account_id=acc["id"])
-            st.success(f"Session saved for {acc_name}!")
+            st.rerun()
 
     if st.button("🗑️ Clear X Session", key=f"clear_{acc['id']}", disabled=not session_exists):
         try:

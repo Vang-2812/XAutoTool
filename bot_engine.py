@@ -1208,7 +1208,7 @@ OUTPUT FORMAT — follow EXACTLY:
                         
                         # Check text length: skip if < 50 characters (as requested)
                         if len(tweet_content) < 50:
-                            status_callback(f"⏭️ [{posts_scanned}/{self.max_posts}] Nội dung quá ngắn ({len(tweet_content)} ký tự), bỏ qua.")
+                            status_callback(f"⏭️ [{posts_scanned}/{self.max_posts}] Content is too short ({len(tweet_content)} characters), skipping.")
                             continue
 
                         # Extract view count

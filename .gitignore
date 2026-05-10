@@ -27,11 +27,18 @@ venv/
 .venv/
 ENV/
 
-# Project Specific
+# Project Specific (Data & Config)
 settings.json
-x_profile/
+x_profile*
 history.db
+*.db
+*.db-journal
 .env
+
+# Playwright / Browser
+*.pma
+Crashpad/
+logs/
 
 # Streamlit
 .streamlit/
