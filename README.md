@@ -1,79 +1,61 @@
-# 🐦 XAuto: AI-Powered X Automation Bot
+# 🐦 XAuto: Multi-Account AI Automation Bot
 
-XAuto is a sophisticated, AI-driven automation tool for X (formerly Twitter). It uses Playwright for browser automation and leverages cutting-edge LLMs (Gemini, OpenAI, DeepSeek) to generate human-like, high-engagement replies. Designed with stealth and engagement optimization in mind, XAuto helps you scale your presence on X effortlessly.
+XAuto is a robust, multi-account automation tool for X (formerly Twitter). It leverages Playwright for high-fidelity browser automation and state-of-the-art LLMs (Gemini, OpenAI, DeepSeek) to generate engaging, human-like interactions. Designed for scale, XAuto allows you to manage and run multiple accounts simultaneously from a single dashboard.
 
-## ✨ Features
+## ✨ Key Features
 
-- **🤖 Multi-Model AI Support**: Choose between Google Gemini (2.0/2.5 Flash/Pro), OpenAI (GPT-4o/mini), or DeepSeek (v4 Flash/Pro).
+- **👥 Multi-Account Management**: Add, remove, and configure multiple X accounts independently.
+- **🚀 Concurrent Execution**: Run multiple bot instances in parallel using multi-threading.
+- **🤖 Advanced AI Integration**: Support for Gemini 2.0/2.5, GPT-4o, and DeepSeek v4 models.
 - **📈 Engagement-Driven Strategies**:
-  - **Reply to Post**: Direct AI response based on post content.
-  - **Mimic Top Comments**: Analyzes high-performing replies to blend in and maximize reach.
-  - **Reply if Latest Comment Active**: Smart filtering to only engage with posts currently trending.
-  - **Re-Reply Strategy**: Automatically sequences follow-up comments based on your previous interaction performance.
-- **🛡️ Stealth & Anti-Detection**: Integrated `playwright-stealth` and realistic human-mimicry delays to avoid bot detection.
-- **📊 Real-Time Dashboard**: Built with Streamlit for a clean, interactive UI to monitor logs, manage settings, and track interaction history.
-- **💾 Local Database**: SQLite integration to prevent duplicate interactions and manage reply variants.
-- **🔑 Session Management**: Persistent browser context so you only need to log in once.
+  - **Reply to Post**: Direct AI response based on tweet content.
+  - **Mimic Top Comments**: Blends in by matching the tone of high-performing replies.
+  - **Reply if Latest Active**: Engages only if recent comments meet a view threshold.
+  - **Re-Reply Strategy**: Sequences follow-up comments on active threads.
+- **👯 Copy Settings**: Quickly clone configurations (models, prompts, thresholds) between accounts.
+- **🛡️ Stealth & Anti-Detection**: Uses `playwright-stealth` and human-like interaction patterns.
+- **📊 Real-Time Dashboard**: Monitor logs, status, and history for all accounts in one view.
+- **💾 Data Isolation**: Each account maintains its own unique browser profile and database history.
 
 ## 🛠️ Installation
 
-### 1. Clone the Repository
+### 1. Clone & Setup
 ```bash
 git clone https://github.com/yourusername/XAuto.git
 cd XAuto
-```
-
-### 2. Install Dependencies
-Ensure you have Python 3.9+ installed.
-```bash
 pip install -r requirements.txt
-```
-
-### 3. Install Playwright Browsers
-```bash
 playwright install chromium
 ```
 
 ## 🚀 Getting Started
 
-### 1. Launch the Dashboard
-```bash
-streamlit run main.py
-```
-
-### 2. Configure Your API Keys
-Open the sidebar in the Streamlit dashboard and enter your API keys for:
-- OpenAI
-- Google Gemini
-- DeepSeek (and Base URL if applicable)
-
-### 3. Setup X Session
-Click **"🔑 Setup X Session (Login)"** in the dashboard. A browser window will open; log in to your X account and close the window once redirected to the home feed. Your session will be saved locally in the `x_profile` folder.
-
-### 4. Start Automating
-Adjust your scan limits and engagement thresholds, then hit **"🚀 Start Automation"**.
+1. **Launch Dashboard**: `streamlit run main.py`
+2. **Add Accounts**: In the sidebar, use **"➕ Add New"** to create account profiles.
+3. **Setup Session**: Select an account → Click **"🔑 Setup X Session"** to log in manually once.
+4. **Configure**: Set your AI model, strategy, and custom prompts per account.
+5. **Start Bot**: Select the accounts you want to run and click **"🚀 Start Selected Accounts"**.
 
 ## ⚙️ Configuration
 
 | Setting | Description |
 |---------|-------------|
-| **Max Posts to Scan** | Number of posts to analyze in the timeline. |
-| **Max Comments to Post** | Daily/Session limit for successful replies. |
-| **View Threshold** | Minimum views a post must have to be considered. |
-| **Comment Strategy** | The logic used to generate and post replies. |
-| **Min Comment Views** | Used in Mimic/Active modes to filter quality interactions. |
+| **View Threshold** | Minimum views a post must have to be scanned. |
+| **Min Content Length** | Bot automatically skips posts with < 50 characters for better quality. |
+| **Premium Only** | Filter to only interact with verified (blue check) accounts. |
+| **Min Comment Views** | Threshold for mimicking or detecting "active" threads. |
+| **Custom Prompt** | Add specific tone/style instructions for the AI. |
 
 ## 📁 Project Structure
 
-- `main.py`: Streamlit frontend and dashboard logic.
-- `bot_engine.py`: Core Playwright automation and AI integration.
-- `db_manager.py`: SQLite database operations for history and variants.
-- `settings_manager.py`: Persistent configuration handling.
-- `x_profile/`: Local directory storing your encrypted X session data.
+- `main.py`: Multi-threaded Streamlit dashboard.
+- `bot_engine.py`: Automation core and AI logic.
+- `db_manager.py`: Multi-tenant SQLite handling.
+- `settings_manager.py`: Hierarchical config (Global API keys + Per-Account settings).
+- `x_profile_*/`: Isolated browser profiles for each account.
 
 ## ⚠️ Disclaimer
 
-This tool is for educational purposes only. Automated interaction with X may violate their Terms of Service. Use responsibly and at your own risk.
+This tool is for educational purposes. Use responsibly. Automated activity may lead to account restrictions if not configured with realistic delays.
 
 ---
 *Built with ❤️ for the X Community.*
