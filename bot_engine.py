@@ -14,6 +14,7 @@ from db_manager import (
 from settings_manager import get_profile_dir
 import os
 import re
+import shutil
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -133,6 +134,31 @@ class XBot:
         except Exception as e:
             logger.debug(f"Like action failed (non-critical): {e}")
         return False
+
+    def _cleanup_profile(self):
+        """Delete non-essential browser data to save disk space while keeping login."""
+        if not os.path.exists(self.user_data_dir):
+            return
+            
+        # Heavy directories that can be safely deleted without losing login session
+        to_remove = [
+            os.path.join(self.user_data_dir, "Default", "Cache"),
+            os.path.join(self.user_data_dir, "Default", "Code Cache"),
+            os.path.join(self.user_data_dir, "Default", "GPUCache"),
+            os.path.join(self.user_data_dir, "Default", "Service Worker", "CacheStorage"),
+            os.path.join(self.user_data_dir, "Default", "Service Worker", "ScriptCache"),
+            os.path.join(self.user_data_dir, "ShaderCache"),
+            os.path.join(self.user_data_dir, "GrShaderCache"),
+            os.path.join(self.user_data_dir, "GraphiteDawnCache"),
+        ]
+        
+        for path in to_remove:
+            if os.path.exists(path):
+                try:
+                    shutil.rmtree(path)
+                    logger.debug(f"Cleaned up: {path}")
+                except Exception as e:
+                    logger.debug(f"Failed to clean {path}: {e}")
 
     def _handle_modals(self, page, skip_on_detect=False):
         """Check for and dismiss common X modals (like the 'Views' info popup)."""
@@ -1172,13 +1198,20 @@ OUTPUT FORMAT — follow EXACTLY:
         return comments_posted
 
     def run(self, status_callback):
+        # Clean up heavy cache files before launching to save disk space
+        self._cleanup_profile()
+        
         with sync_playwright() as p:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=self.user_data_dir,
                 headless=False,
                 channel="msedge",
                 ignore_default_args=["--enable-automation"],
-                args=["--disable-blink-features=AutomationControlled"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disk-cache-size=10485760",  # Limit to 10MB
+                    "--media-cache-size=10485760", # Limit to 10MB
+                ],
                 user_agent=USER_AGENT,
                 viewport={'width': 1920, 'height': 1080},
                 locale="en-US"
