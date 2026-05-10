@@ -1,39 +1,151 @@
 import json
 import os
+import uuid
 
 SETTINGS_FILE = "settings.json"
 
-def load_settings():
-    defaults = {
+# Default bot settings for a new account
+_DEFAULT_ACCOUNT_SETTINGS = {
+    "ai_model": "gpt-4o-mini",
+    "max_posts_scan": 20,
+    "max_comments_post": 5,
+    "view_threshold": 1000,
+    "comment_strategy": "Reply to Post",
+    "min_comment_views": 1000,
+    "custom_prompt": (
+        "- Each reply ≤ 310 characters.\n"
+        "- Replies must be in the SAME LANGUAGE as the post / comments provided.\n"
+        "- Tone: natural, human — slight typos allowed — humorous / professional / viral as fits.\n"
+        "- Content: light analysis of the post with an expert-like, engaging angle.\n"
+        "- Avoid sensitive, harmful, or policy-violating language.\n"
+        "- Goal: maximize views (10k+) and shareability."
+    ),
+    "premium_only": False,
+}
+
+# Keys that belong to global (shared) config
+_GLOBAL_KEYS = ["openai_api_key", "gemini_api_key", "deepseek_api_key", "deepseek_base_url"]
+
+# Keys that belong to per-account config
+ACCOUNT_SETTING_KEYS = list(_DEFAULT_ACCOUNT_SETTINGS.keys())
+
+
+def _default_global():
+    return {
         "openai_api_key": "",
         "gemini_api_key": "",
         "deepseek_api_key": "",
         "deepseek_base_url": "https://ds2api-peach-two.vercel.app/v1",
-        "ai_model": "gpt-4o-mini",
-        "max_posts_scan": 20,
-        "max_comments_post": 5,
-        "view_threshold": 1000,
-        "comment_strategy": "Reply to Post",
-        "min_comment_views": 1000,
-        "custom_prompt": (
-            "- Each reply ≤ 310 characters.\n"
-            "- Replies must be in the SAME LANGUAGE as the post / comments provided.\n"
-            "- Tone: natural, human — slight typos allowed — humorous / professional / viral as fits.\n"
-            "- Content: light analysis of the post with an expert-like, engaging angle.\n"
-            "- Avoid sensitive, harmful, or policy-violating language.\n"
-            "- Goal: maximize views (10k+) and shareability."
-        ),
     }
-    if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r") as f:
-            settings = json.load(f)
-            # Merge defaults to handle missing keys
-            for key, value in defaults.items():
-                if key not in settings:
-                    settings[key] = value
-            return settings
-    return defaults
+
+
+def _make_account(account_id=None, name="Account 1"):
+    """Create a new account dict with default settings."""
+    return {
+        "id": account_id or f"acc_{uuid.uuid4().hex[:8]}",
+        "name": name,
+        **_DEFAULT_ACCOUNT_SETTINGS.copy(),
+    }
+
+
+def load_settings():
+    """
+    Load settings from disk.
+    Handles migration from old single-account format to new multi-account format.
+    Returns: { "global": {...}, "accounts": [{...}, ...] }
+    """
+    defaults = {
+        "global": _default_global(),
+        "accounts": [_make_account(account_id="default", name="Account 1")],
+    }
+
+    if not os.path.exists(SETTINGS_FILE):
+        return defaults
+
+    # Try utf-8 first; fall back to cp1252 for old Windows-encoded files
+    raw = None
+    for enc in ("utf-8", "cp1252", "latin-1"):
+        try:
+            with open(SETTINGS_FILE, "r", encoding=enc) as f:
+                raw = json.load(f)
+            break
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+
+    if raw is None:
+        # Could not decode at all — return defaults
+        return defaults
+
+    # --- Migration: old flat format → new multi-account format ---
+    if "accounts" not in raw:
+        # Old format detected — convert
+        global_cfg = {}
+        for k in _GLOBAL_KEYS:
+            global_cfg[k] = raw.get(k, _default_global().get(k, ""))
+
+        account_cfg = _make_account(account_id="default", name="Account 1")
+        for k in ACCOUNT_SETTING_KEYS:
+            if k in raw:
+                account_cfg[k] = raw[k]
+
+        return {"global": global_cfg, "accounts": [account_cfg]}
+
+    # New format — ensure all keys present
+    result = {"global": {}, "accounts": []}
+
+    # Merge global defaults
+    g = _default_global()
+    g.update(raw.get("global", {}))
+    result["global"] = g
+
+    # Merge account defaults
+    for acc in raw.get("accounts", []):
+        merged = _make_account(account_id=acc.get("id"), name=acc.get("name", "Unnamed"))
+        for k in ACCOUNT_SETTING_KEYS:
+            if k in acc:
+                merged[k] = acc[k]
+        merged["id"] = acc.get("id", merged["id"])
+        merged["name"] = acc.get("name", merged["name"])
+        result["accounts"].append(merged)
+
+    if not result["accounts"]:
+        result["accounts"] = [_make_account(account_id="default", name="Account 1")]
+
+    return result
+
 
 def save_settings(settings):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(settings, f, indent=4)
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=4, ensure_ascii=False)
+
+
+def add_account(settings, name="New Account"):
+    """Add a new account to settings and return the updated settings + new account."""
+    acc = _make_account(name=name)
+    settings["accounts"].append(acc)
+    save_settings(settings)
+    return settings, acc
+
+
+def remove_account(settings, account_id):
+    """Remove an account by id. Cannot remove the last remaining account."""
+    if len(settings["accounts"]) <= 1:
+        return settings
+    settings["accounts"] = [a for a in settings["accounts"] if a["id"] != account_id]
+    save_settings(settings)
+    return settings
+
+
+def get_account_by_id(settings, account_id):
+    """Return the account dict with the given id, or None."""
+    for acc in settings["accounts"]:
+        if acc["id"] == account_id:
+            return acc
+    return None
+
+
+def get_profile_dir(account_id):
+    """Return the browser profile directory path for an account."""
+    if account_id == "default":
+        return "x_profile"
+    return f"x_profile_{account_id}"

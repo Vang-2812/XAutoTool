@@ -11,6 +11,7 @@ from db_manager import (
     get_next_variant, get_posts_with_pending_variants,
     get_post_url_by_variant_text
 )
+from settings_manager import get_profile_dir
 import os
 import re
 
@@ -19,7 +20,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("XBot")
 
 STATE_FILE = "state.json"
-USER_DATA_DIR = "x_profile"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
 
 
@@ -31,7 +31,8 @@ class ModalDetectedException(Exception):
 class XBot:
     def __init__(self, api_key, model, max_posts, max_comments, view_threshold,
                  gemini_api_key=None, deepseek_api_key=None, deepseek_base_url=None,
-                 comment_strategy="Reply to Post", min_comment_views=1000, custom_prompt=""):
+                 comment_strategy="Reply to Post", min_comment_views=1000, custom_prompt="",
+                 premium_only=False, account_id="default", account_name="Account"):
         self.api_key = api_key
         self.gemini_api_key = gemini_api_key
         self.deepseek_api_key = deepseek_api_key
@@ -43,6 +44,10 @@ class XBot:
         self.comment_strategy = comment_strategy
         self.min_comment_views = min_comment_views
         self.custom_prompt = custom_prompt
+        self.premium_only = premium_only
+        self.account_id = account_id
+        self.account_name = account_name
+        self.user_data_dir = get_profile_dir(account_id)
 
         if "gpt" in model:
             self.client = openai.OpenAI(api_key=api_key)
@@ -57,8 +62,8 @@ class XBot:
         self.stop_requested = False
         # Track processed post URLs to avoid re-evaluating
         self.processed_urls = set()
-        # Load already-replied URLs from DB to avoid duplicates
-        self.replied_urls = set(get_posted_urls())
+        # Load already-replied URLs from DB to avoid duplicates (scoped to this account)
+        self.replied_urls = set(get_posted_urls(account_id=self.account_id))
  
     def _handle_modals(self, page, skip_on_detect=False):
         """Check for and dismiss common X modals (like the 'Views' info popup)."""
@@ -165,7 +170,7 @@ OUTPUT FORMAT — follow EXACTLY:
             if not variants:
                 logger.warning("generate_reply: no variants parsed from AI output.")
                 return None
-            save_reply_variants(post_url, variants)
+            save_reply_variants(post_url, variants, account_id=self.account_id)
             logger.info(f"Saved {len(variants)} reply variants for {post_url}")
             return variants[0]
         except Exception as e:
@@ -196,7 +201,7 @@ OUTPUT FORMAT — follow EXACTLY:
             if not variants:
                 logger.warning("generate_mimic_reply: no variants parsed from AI output.")
                 return None
-            save_reply_variants(post_url, variants)
+            save_reply_variants(post_url, variants, account_id=self.account_id)
             logger.info(f"Saved {len(variants)} mimic-reply variants for {post_url}")
             return variants[0]
         except Exception as e:
@@ -313,6 +318,29 @@ OUTPUT FORMAT — follow EXACTLY:
                     pass
 
         return view_count
+    
+    def _is_premium_account(self, post):
+        """Check if the post author has a verified (premium) badge."""
+        try:
+            # X uses data-testid="icon-verified" for blue/gold/grey ticks
+            verified_icon = post.query_selector('[data-testid="icon-verified"]')
+            if verified_icon:
+                return True
+            
+            # Fallback check for SVG paths or aria-labels that might indicate verification
+            # The badge is usually inside the user name container
+            user_name_container = post.query_selector('[data-testid="User-Name"]')
+            if user_name_container:
+                # Look for SVGs that might be the badge if data-testid is missing/changed
+                svgs = user_name_container.query_selector_all('svg')
+                for svg in svgs:
+                    label = svg.get_attribute("aria-label")
+                    if label and "Verified" in label:
+                        return True
+            
+            return False
+        except Exception:
+            return False
 
     def _parse_count_string(self, count_str):
         """Parse a count string like '1.2K', '3M', '12,345' into an integer."""
@@ -368,8 +396,9 @@ OUTPUT FORMAT — follow EXACTLY:
             time.sleep(2)
 
             articles = page.query_selector_all('article')
-            # The first article is the original post — skip it
-            reply_articles = articles[1:]
+            # The first article is the original post — skip it. 
+            # We only check the first 5 reply articles as per the "Active" check rules.
+            reply_articles = articles[1:6]
 
             for article in reply_articles:
                 try:
@@ -408,7 +437,7 @@ OUTPUT FORMAT — follow EXACTLY:
             time.sleep(random.uniform(2, 4))
         except Exception as e:
             status_callback(f"❌ Failed to load post page: {e}")
-            log_interaction(post_url, "", "Navigation Failed", int(view_count))
+            log_interaction(post_url, "", "Navigation Failed", int(view_count), account_id=self.account_id)
             return False
 
         # Check for modals immediately after loading
@@ -419,7 +448,7 @@ OUTPUT FORMAT — follow EXACTLY:
         reply_text, variant_id = self._generate_and_get_variant(post_url, "reply", post_text)
         if not reply_text:
             status_callback("❌ AI failed to generate a reply. Skipping this post.")
-            log_interaction(post_url, "", "AI Generation Failed", int(view_count))
+            log_interaction(post_url, "", "AI Generation Failed", int(view_count), account_id=self.account_id)
             return False
 
         status_callback(f"🤖 AI Reply (variant 1/5): \"{reply_text[:80]}...\"")
@@ -437,7 +466,7 @@ OUTPUT FORMAT — follow EXACTLY:
             time.sleep(random.uniform(2, 4))
         except Exception as e:
             status_callback(f"❌ Failed to load post page: {e}")
-            log_interaction(post_url, "", "Navigation Failed", int(view_count))
+            log_interaction(post_url, "", "Navigation Failed", int(view_count), account_id=self.account_id)
             return False
 
         # Check for modals immediately after loading
@@ -450,7 +479,7 @@ OUTPUT FORMAT — follow EXACTLY:
 
         if not top_comments:
             status_callback(f"⚠️ No comments found with ≥{self.min_comment_views:,} likes. Skipping post.")
-            log_interaction(post_url, "", "No Qualifying Comments", int(view_count))
+            log_interaction(post_url, "", "No Qualifying Comments", int(view_count), account_id=self.account_id)
             return False
 
         status_callback(
@@ -463,7 +492,7 @@ OUTPUT FORMAT — follow EXACTLY:
         reply_text, variant_id = self._generate_and_get_variant(post_url, "mimic", post_text, top_comments)
         if not reply_text:
             status_callback("❌ AI failed to generate a mimic reply. Skipping.")
-            log_interaction(post_url, "", "AI Generation Failed", int(view_count))
+            log_interaction(post_url, "", "AI Generation Failed", int(view_count), account_id=self.account_id)
             return False
 
         status_callback(f"🤖 AI Mimic Reply (variant 1/5): \"{reply_text[:80]}...\"")
@@ -484,7 +513,7 @@ OUTPUT FORMAT — follow EXACTLY:
             time.sleep(random.uniform(2, 4))
         except Exception as e:
             status_callback(f"❌ Failed to load post page: {e}")
-            log_interaction(post_url, "", "Navigation Failed", int(view_count))
+            log_interaction(post_url, "", "Navigation Failed", int(view_count), account_id=self.account_id)
             return False
 
         # Check for modals immediately after loading
@@ -664,26 +693,35 @@ OUTPUT FORMAT — follow EXACTLY:
             status_callback("⚠️ No comments found on this post. Skipping.")
             return False
 
-        # Inspect the first (most recent) comment's view count
-        first_comment = reply_articles[0]
-        latest_views = self._extract_comment_view_count(page, first_comment)
-
-
-        if latest_views < self.min_comment_views:
+        # Check if any of the 5 most recent comments meet the view threshold
+        is_active = False
+        max_to_check = min(5, len(reply_articles))
+        found_active_views = 0
+        
+        status_callback(f"🔎 Checking top {max_to_check} latest comments for activity...")
+        
+        for i in range(max_to_check):
+            views = self._extract_comment_view_count(page, reply_articles[i])
+            if views >= self.min_comment_views:
+                is_active = True
+                found_active_views = views
+                status_callback(f"✅ Found active comment at position {i+1} with {views:,} views.")
+                break
+        
+        if not is_active:
             status_callback(
-                f"⏭️ Latest comment has {latest_views:,} views "
-                f"(below {self.min_comment_views:,} threshold). Skipping post."
+                f"⏭️ None of the top {max_to_check} latest comments met the {self.min_comment_views:,} views threshold. Skipping post."
             )
             return False
 
         # Post is still active — generate 5 reply variants based on the post's own content
         status_callback(
-            f"🔥 Post is active! Latest comment: {latest_views:,} views. Generating 5 reply variants..."
+            f"🔥 Post is active! (Max views in top 5: {found_active_views:,}). Generating 5 reply variants..."
         )
         reply_text, variant_id = self._generate_and_get_variant(post_url, "reply", post_text)
         if not reply_text:
             status_callback("❌ AI failed to generate a reply. Skipping.")
-            log_interaction(post_url, "", "AI Generation Failed", int(view_count))
+            log_interaction(post_url, "", "AI Generation Failed", int(view_count), account_id=self.account_id)
             return False
 
         status_callback(f"🤖 AI Reply (variant 1/5): \"{reply_text[:80]}...\"")
@@ -708,7 +746,7 @@ OUTPUT FORMAT — follow EXACTLY:
 
         # Retrieve the DB id for variant 0 (the one we're about to post)
         from db_manager import get_next_variant
-        v = get_next_variant(post_url)
+        v = get_next_variant(post_url, account_id=self.account_id)
         variant_id = v["id"] if v else None
         return text, variant_id
 
@@ -842,19 +880,19 @@ OUTPUT FORMAT — follow EXACTLY:
                         except Exception as _ve:
                             logger.warning(f"Could not mark variant posted: {_ve}")
 
-                    log_interaction(post_url, reply_text, "Success", int(view_count))
+                    log_interaction(post_url, reply_text, "Success", int(view_count), account_id=self.account_id)
                     status_callback(f"✅ Reply posted successfully!")
                     logger.info(f"Reply posted to {post_url}")
                 else:
                     status_callback("❌ Could not find the send button.")
-                    log_interaction(post_url, reply_text, "Send Button Not Found", int(view_count))
+                    log_interaction(post_url, reply_text, "Send Button Not Found", int(view_count), account_id=self.account_id)
             except Exception as e:
                 status_callback(f"❌ Error posting reply: {e}")
-                log_interaction(post_url, reply_text, f"Error: {str(e)[:100]}", int(view_count))
+                log_interaction(post_url, reply_text, f"Error: {str(e)[:100]}", int(view_count), account_id=self.account_id)
                 logger.error(f"Error posting reply: {e}")
         else:
             status_callback("❌ Could not find reply input box on post page.")
-            log_interaction(post_url, reply_text, "Reply Box Not Found", int(view_count))
+            log_interaction(post_url, reply_text, "Reply Box Not Found", int(view_count), account_id=self.account_id)
 
         # Wait before navigating away (human-like behavior)
         if reply_posted:
@@ -908,7 +946,7 @@ OUTPUT FORMAT — follow EXACTLY:
             return 0
 
         # Build a set of post_urls that have pending variants — fast lookup
-        pending_post_urls = set(get_posts_with_pending_variants())
+        pending_post_urls = set(get_posts_with_pending_variants(account_id=self.account_id))
         if not pending_post_urls:
             status_callback("ℹ️ [Re-Reply] No posts with queued variants found. Run a normal strategy first.")
             return 0
@@ -973,7 +1011,7 @@ OUTPUT FORMAT — follow EXACTLY:
                             reply_text_content = text_el.inner_text().strip()
                             # Clean up the text (remove newlines, etc. to match DB)
                             reply_text_content = reply_text_content.replace("\n", " ")
-                            parent_url = get_post_url_by_variant_text(reply_text_content)
+                            parent_url = get_post_url_by_variant_text(reply_text_content, account_id=self.account_id)
                             if parent_url:
                                 status_callback(f"🔗 [Re-Reply] Linked reply to parent via content match.")
 
@@ -995,7 +1033,7 @@ OUTPUT FORMAT — follow EXACTLY:
                         continue
 
                     # Fetch the next un-posted variant for this parent post
-                    variant = get_next_variant(parent_url)
+                    variant = get_next_variant(parent_url, account_id=self.account_id)
                     if not variant:
                         status_callback(
                             f"ℹ️ [Re-Reply] No more queued variants for {parent_url[-40:]}. Skipping."
@@ -1037,7 +1075,7 @@ OUTPUT FORMAT — follow EXACTLY:
                             f"📊 [Re-Reply] Progress: {comments_posted}/{self.max_comments} comments posted"
                         )
                         # Update pending set
-                        if not get_next_variant(parent_url):
+                        if not get_next_variant(parent_url, account_id=self.account_id):
                             pending_post_urls.discard(parent_url)
                     
                     # No need to return to replies tab, we never left it!
@@ -1068,7 +1106,7 @@ OUTPUT FORMAT — follow EXACTLY:
     def run(self, status_callback):
         with sync_playwright() as p:
             context = p.chromium.launch_persistent_context(
-                user_data_dir=USER_DATA_DIR,
+                user_data_dir=self.user_data_dir,
                 headless=False,
                 channel="msedge",
                 ignore_default_args=["--enable-automation"],
@@ -1161,17 +1199,23 @@ OUTPUT FORMAT — follow EXACTLY:
                             status_callback(f"⏭️ [{posts_scanned}/{self.max_posts}] Already replied to this post, skipping.")
                             continue
 
-                        # Get post text
+                        # Get post text (entire article text for metrics extraction)
                         post_text = post.inner_text()
-                        if not post_text or len(post_text.strip()) < 10:
-                            status_callback(f"⏭️ [{posts_scanned}/{self.max_posts}] Post too short, skipping.")
+                        
+                        # Extract actual tweet content text (the post body)
+                        tweet_text_el = post.query_selector('[data-testid="tweetText"]')
+                        tweet_content = tweet_text_el.inner_text().strip() if tweet_text_el else ""
+                        
+                        # Check text length: skip if < 50 characters (as requested)
+                        if len(tweet_content) < 50:
+                            status_callback(f"⏭️ [{posts_scanned}/{self.max_posts}] Nội dung quá ngắn ({len(tweet_content)} ký tự), bỏ qua.")
                             continue
 
                         # Extract view count
                         view_count = self._extract_view_count(page, post, post_text)
 
-                        # Extract a short preview of the post
-                        preview = post_text.strip().split('\n')[0][:60]
+                        # Extract a short preview of the post from the actual content
+                        preview = tweet_content[:60].replace("\n", " ")
 
                         if view_count < self.view_threshold:
                             status_callback(
@@ -1179,6 +1223,15 @@ OUTPUT FORMAT — follow EXACTLY:
                                 f"\"{preview}...\" — {view_count:,} views (below {self.view_threshold:,} threshold)"
                             )
                             continue
+                        
+                        # Check for Premium Account if enabled
+                        if self.premium_only:
+                            if not self._is_premium_account(post):
+                                status_callback(
+                                    f"⏭️ [{posts_scanned}/{self.max_posts}] "
+                                    f"\"{preview}...\" — Not a Premium account, skipping."
+                                )
+                                continue
 
                         # This post qualifies!
                         status_callback(
@@ -1193,11 +1246,11 @@ OUTPUT FORMAT — follow EXACTLY:
                         success = False
                         try:
                             if self.comment_strategy == "Mimic Top Comments":
-                                success = self._mimic_top_comment_and_reply(new_page, post_url, post_text, view_count, status_callback)
+                                success = self._mimic_top_comment_and_reply(new_page, post_url, tweet_content, view_count, status_callback)
                             elif self.comment_strategy == "Reply if Latest Comment Active":
-                                success = self._reply_if_latest_comment_active(new_page, post_url, post_text, view_count, status_callback)
+                                success = self._reply_if_latest_comment_active(new_page, post_url, tweet_content, view_count, status_callback)
                             else:
-                                success = self._enter_post_and_reply(new_page, post_url, post_text, view_count, status_callback)
+                                success = self._enter_post_and_reply(new_page, post_url, tweet_content, view_count, status_callback)
                         except ModalDetectedException:
                             status_callback(f"⏭️ Skipping post: UI blocked by popup modal.")
                             success = False
@@ -1248,10 +1301,12 @@ OUTPUT FORMAT — follow EXACTLY:
             context.close()
 
 
-def start_login_session():
+def start_login_session(account_id="default"):
+    """Open a browser for manual login, saving session to account-specific profile dir."""
+    profile_dir = get_profile_dir(account_id)
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
-            user_data_dir=USER_DATA_DIR,
+            user_data_dir=profile_dir,
             headless=False,
             channel="msedge",
             ignore_default_args=["--enable-automation"],
@@ -1267,7 +1322,7 @@ def start_login_session():
 
         page.goto("https://x.com/home")
 
-        print("Waiting 5 minutes for manual login... Browser will stay open.")
+        print(f"Waiting 5 minutes for manual login (account: {account_id})... Browser will stay open.")
         try:
             page.wait_for_timeout(300000)  # 5 minutes
         except Exception as e:

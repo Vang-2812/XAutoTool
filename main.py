@@ -3,85 +3,149 @@ import pandas as pd
 import threading
 import time
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from streamlit.runtime.scriptrunner import get_script_run_ctx, add_script_run_ctx
 from bot_engine import XBot, start_login_session
-from settings_manager import load_settings, save_settings
-from db_manager import init_db, get_history
+from settings_manager import (
+    load_settings, save_settings,
+    add_account, remove_account, get_account_by_id,
+    get_profile_dir, ACCOUNT_SETTING_KEYS
+)
+from db_manager import init_db, get_history, get_variants_for_url
 import os
 
 # Page Config
 st.set_page_config(page_title="X AutoBot", page_icon="🐦", layout="wide")
 
-USER_DATA_DIR = "x_profile"  # must match bot_engine.py
-
 # Initialize DB
 init_db()
 
-# Load Settings
+# Load Settings (multi-account format)
 if "settings" not in st.session_state:
     st.session_state.settings = load_settings()
 
 if "logs" not in st.session_state:
-    st.session_state.logs = []
+    st.session_state.logs = []  # Global log stream
+
+if "account_status" not in st.session_state:
+    st.session_state.account_status = {}  # {account_id: "Idle" | "Running" | "Finished" | ...}
+
+if "account_bots" not in st.session_state:
+    st.session_state.account_bots = {}  # {account_id: XBot instance}
+
+if "account_threads" not in st.session_state:
+    st.session_state.account_threads = {}  # {account_id: Thread}
 
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
 
-if "status_text" not in st.session_state:
-    st.session_state.status_text = "Idle"
-
 if "progress" not in st.session_state:
     st.session_state.progress = 0.0
 
-# Ensure new settings keys exist with defaults
-st.session_state.settings.setdefault("comment_strategy", "Reply to Post")
-st.session_state.settings.setdefault("min_comment_views", 1000)
-st.session_state.settings.setdefault("deepseek_api_key", "")
-st.session_state.settings.setdefault("deepseek_base_url", "https://ds2api-peach-two.vercel.app/v1")
-st.session_state.settings.setdefault("custom_prompt", "")
 
-# Helper to update status from thread
-def update_status(text):
-    st.session_state.status_text = text
-    st.session_state.logs.append({"Time": time.strftime("%H:%M:%S"), "Message": text})
-    # Keep only last 50 logs
-    if len(st.session_state.logs) > 50:
-        st.session_state.logs.pop(0)
+# Helper to update status from thread (thread-safe via session_state)
+def make_status_callback(account_id, account_name):
+    """Create a status callback scoped to a specific account."""
+    def update_status(text):
+        prefixed = f"[{account_name}] {text}"
+        st.session_state.account_status[account_id] = text
+        st.session_state.logs.append({"Time": time.strftime("%H:%M:%S"), "Message": prefixed})
+        # Keep only last 100 logs
+        if len(st.session_state.logs) > 100:
+            st.session_state.logs.pop(0)
+    return update_status
 
-# Sidebar: Settings
+
+# ------------------------------------------------------------------
+# Sidebar: Global Settings + Account Management
+# ------------------------------------------------------------------
 with st.sidebar:
     st.title("⚙️ Settings")
-    
-    api_key = st.text_input("OpenAI API Key", value=st.session_state.settings["openai_api_key"], type="password")
-    gemini_key = st.text_input("Gemini API Key", value=st.session_state.settings["gemini_api_key"], type="password")
-    deepseek_key = st.text_input("DeepSeek API Key", value=st.session_state.settings["deepseek_api_key"], type="password")
-    deepseek_url = st.text_input("DeepSeek Base URL", value=st.session_state.settings["deepseek_base_url"])
-    
-    models = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "deepseek-v4-flash", "deepseek-v4-pro"]
-    current_model = st.session_state.settings["ai_model"]
-    model_index = models.index(current_model) if current_model in models else 1
-    model = st.selectbox("AI Model", models, index=model_index)
-    
+    settings = st.session_state.settings
+
+    # --- Global API Keys ---
+    st.markdown("**🔑 API Keys (Shared)**")
+    api_key = st.text_input("OpenAI API Key", value=settings["global"].get("openai_api_key", ""), type="password")
+    gemini_key = st.text_input("Gemini API Key", value=settings["global"].get("gemini_api_key", ""), type="password")
+    deepseek_key = st.text_input("DeepSeek API Key", value=settings["global"].get("deepseek_api_key", ""), type="password")
+    deepseek_url = st.text_input("DeepSeek Base URL", value=settings["global"].get("deepseek_base_url", ""))
+
+    # Sync global keys
+    _new_global = {
+        "openai_api_key": api_key,
+        "gemini_api_key": gemini_key,
+        "deepseek_api_key": deepseek_key,
+        "deepseek_base_url": deepseek_url,
+    }
+    if _new_global != settings["global"]:
+        settings["global"] = _new_global
+        save_settings(settings)
+
     st.divider()
-    
-    max_posts = st.number_input("Max Posts to Scan", min_value=1, max_value=500, value=st.session_state.settings["max_posts_scan"])
-    max_comments = st.number_input("Max Comments to Post", min_value=1, max_value=100, value=st.session_state.settings["max_comments_post"])
-    view_threshold = st.number_input("Post View Threshold", min_value=0, value=st.session_state.settings["view_threshold"])
+
+    # --- Account Management ---
+    st.markdown("**👥 Account Management**")
+
+    account_names = [f"{acc['name']} ({acc['id']})" for acc in settings["accounts"]]
+    account_ids = [acc["id"] for acc in settings["accounts"]]
+
+    # Add Account
+    col_add, col_del = st.columns(2)
+    with col_add:
+        if st.button("➕ Add Account", use_container_width=True):
+            new_name = f"Account {len(settings['accounts']) + 1}"
+            settings, new_acc = add_account(settings, name=new_name)
+            st.session_state.settings = settings
+            st.rerun()
+    with col_del:
+        if st.button("🗑️ Remove Last", use_container_width=True, disabled=len(settings["accounts"]) <= 1):
+            last_acc = settings["accounts"][-1]
+            settings = remove_account(settings, last_acc["id"])
+            st.session_state.settings = settings
+            st.rerun()
+
+    # Select which account to configure
+    selected_idx = st.selectbox(
+        "Configure Account",
+        range(len(account_names)),
+        format_func=lambda i: account_names[i],
+        key="config_account_select"
+    )
+    acc = settings["accounts"][selected_idx]
+
+    st.divider()
+
+    # --- Per-Account Settings ---
+    st.markdown(f"**⚙️ Settings: {acc['name']}**")
+
+    acc_name = st.text_input("Account Name", value=acc["name"], key=f"name_{acc['id']}")
+
+    models = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "deepseek-v4-flash", "deepseek-v4-pro"]
+    current_model = acc.get("ai_model", "gpt-4o-mini")
+    model_index = models.index(current_model) if current_model in models else 1
+    model = st.selectbox("AI Model", models, index=model_index, key=f"model_{acc['id']}")
+
+    max_posts = st.number_input("Max Posts to Scan", min_value=1, max_value=500, value=acc.get("max_posts_scan", 20), key=f"maxposts_{acc['id']}")
+    max_comments = st.number_input("Max Comments to Post", min_value=1, max_value=100, value=acc.get("max_comments_post", 5), key=f"maxcomments_{acc['id']}")
+    view_threshold = st.number_input("Post View Threshold", min_value=0, value=acc.get("view_threshold", 1000), key=f"viewthresh_{acc['id']}")
+    premium_only = st.checkbox("Premium Account Only", value=acc.get("premium_only", False), key=f"premium_{acc['id']}",
+                               help="Only interact with posts from accounts with a verified badge.")
 
     st.divider()
     st.markdown("**💬 Comment Strategy**")
     strategies = ["Reply to Post", "Mimic Top Comments", "Reply if Latest Comment Active", "Re-Reply to Post"]
-    current_strategy = st.session_state.settings["comment_strategy"]
+    current_strategy = acc.get("comment_strategy", "Reply to Post")
     strategy_index = strategies.index(current_strategy) if current_strategy in strategies else 0
     comment_strategy = st.selectbox(
         "How to generate replies",
         strategies,
         index=strategy_index,
+        key=f"strategy_{acc['id']}",
         help=(
             "**Reply to Post**: AI reads the post and crafts a direct reply.\n\n"
             "**Mimic Top Comments**: AI reads top-viewed comments and generates a similar one.\n\n"
-            "**Reply if Latest Comment Active**: Opens Latest tab — only replies if the most recent "
-            "comment meets the Min Comment Views threshold.\n\n"
+            "**Reply if Latest Comment Active**: Opens Latest tab — only replies if at least one of the 5 most recent "
+            "comments meets the Min Comment Views threshold.\n\n"
             "**Re-Reply to Post**: Scans your account's Replies. If a reply has high views, "
             "it posts the next queued variant from the 5 saved comments for that post."
         )
@@ -90,8 +154,9 @@ with st.sidebar:
     min_comment_views = st.number_input(
         "Min Comment Views (Mimic / Active mode)",
         min_value=0,
-        value=st.session_state.settings["min_comment_views"],
-        help="Mimic mode: only use comments with ≥ this many views.\nLatest-Active mode: skip post if the latest comment has fewer views than this.",
+        value=acc.get("min_comment_views", 1000),
+        key=f"minviews_{acc['id']}",
+        help="Mimic mode: only use comments with ≥ this many views.\nLatest-Active mode: skip post if none of the 5 most recent comments meet this threshold.",
         disabled=(comment_strategy == "Reply to Post")
     )
 
@@ -99,18 +164,17 @@ with st.sidebar:
     st.markdown("**✍️ AI Content Prompt**")
     st.caption("Customize the content/style instructions (Output format is fixed).")
     custom_prompt_val = st.text_area(
-        "Instructions", 
-        value=st.session_state.settings["custom_prompt"],
+        "Instructions",
+        value=acc.get("custom_prompt", ""),
         height=180,
+        key=f"prompt_{acc['id']}",
         help="Add instructions like 'Tone: funny' or 'Keep it short'."
     )
-    # Auto-sync: always keep session_state and settings.json up to date
-    # with whatever is currently shown in the sidebar (no Save button needed).
-    _current = {
-        "openai_api_key": api_key,
-        "gemini_api_key": gemini_key,
-        "deepseek_api_key": deepseek_key,
-        "deepseek_base_url": deepseek_url,
+
+    # Auto-sync per-account settings
+    _updated_acc = {
+        "id": acc["id"],
+        "name": acc_name,
         "ai_model": model,
         "max_posts_scan": int(max_posts),
         "max_comments_post": int(max_comments),
@@ -118,95 +182,177 @@ with st.sidebar:
         "comment_strategy": comment_strategy,
         "min_comment_views": int(min_comment_views),
         "custom_prompt": custom_prompt_val,
+        "premium_only": premium_only,
     }
-    if _current != st.session_state.settings:
-        st.session_state.settings = _current
-        save_settings(_current)
+    if _updated_acc != acc:
+        settings["accounts"][selected_idx] = _updated_acc
+        st.session_state.settings = settings
+        save_settings(settings)
 
     st.divider()
-    st.markdown("**🔑 X Session**")
-    session_exists = os.path.exists(USER_DATA_DIR)
-    st.caption(f"Status: {'✅ Active' if session_exists else '❌ No session'}")
 
-    if st.button("🔑 Setup X Session (Login)"):
-        with st.spinner("Opening browser for login..."):
-            start_login_session()
-            st.success("Session saved!")
+    # --- X Session Management (per account) ---
+    st.markdown(f"**🔑 X Session: {acc_name}**")
+    profile_dir = get_profile_dir(acc["id"])
+    session_exists = os.path.exists(profile_dir)
+    st.caption(f"Profile: `{profile_dir}` — {'✅ Active' if session_exists else '❌ No session'}")
 
-    if st.button("🗑️ Clear X Session", disabled=not session_exists):
+    if st.button("🔑 Setup X Session (Login)", key=f"login_{acc['id']}"):
+        with st.spinner(f"Opening browser for {acc_name} login..."):
+            start_login_session(account_id=acc["id"])
+            st.success(f"Session saved for {acc_name}!")
+
+    if st.button("🗑️ Clear X Session", key=f"clear_{acc['id']}", disabled=not session_exists):
         try:
-            shutil.rmtree(USER_DATA_DIR)
-            st.success("Session cleared. You can now log in with a different account.")
+            shutil.rmtree(profile_dir)
+            st.success(f"Session cleared for {acc_name}.")
             st.rerun()
         except Exception as e:
             st.error(f"Failed to clear session: {e}")
 
+# ------------------------------------------------------------------
 # Main Dashboard
+# ------------------------------------------------------------------
 st.title("🐦 X Automation Dashboard")
 
-col1, col2 = st.columns([1, 1])
+# ------------------------------------------------------------------
+# Account selection for running
+# ------------------------------------------------------------------
+st.subheader("🚀 Run Accounts")
 
-with col1:
-    st.subheader("Controls")
-    if not st.session_state.is_running:
-        if st.button("🚀 Start Automation", width="stretch"):
-            selected_model = st.session_state.settings["ai_model"]
+# Build list of accounts with session status
+run_options = []
+for acc in settings["accounts"]:
+    profile_dir = get_profile_dir(acc["id"])
+    has_session = os.path.exists(profile_dir)
+    status = st.session_state.account_status.get(acc["id"], "Idle")
+    run_options.append({
+        "id": acc["id"],
+        "name": acc["name"],
+        "has_session": has_session,
+        "status": status,
+    })
+
+# Display account cards
+cols = st.columns(min(len(run_options), 4))
+selected_accounts = []
+
+for i, opt in enumerate(run_options):
+    col = cols[i % len(cols)]
+    with col:
+        is_account_running = opt["id"] in st.session_state.account_threads and \
+                             st.session_state.account_threads[opt["id"]].is_alive()
+        
+        checked = st.checkbox(
+            f"{'✅' if opt['has_session'] else '❌'} {opt['name']}",
+            value=False,
+            key=f"run_{opt['id']}",
+            disabled=not opt["has_session"] or is_account_running,
+            help=f"Status: {opt['status']}" + ("" if opt["has_session"] else " — No session! Login first.")
+        )
+        if checked:
+            selected_accounts.append(opt["id"])
+
+        # Show per-account status
+        status_text = opt["status"]
+        if is_account_running:
+            st.caption(f"🔄 Running: {status_text}")
+        else:
+            st.caption(f"Status: {status_text}")
+
+st.divider()
+
+# ------------------------------------------------------------------
+# Start / Stop controls
+# ------------------------------------------------------------------
+col_start, col_stop = st.columns(2)
+
+any_running = any(
+    t.is_alive() for t in st.session_state.account_threads.values()
+) if st.session_state.account_threads else False
+
+with col_start:
+    start_disabled = (not selected_accounts) or any_running
+    if st.button("🚀 Start Selected Accounts", disabled=start_disabled, use_container_width=True):
+        # Validate API keys for selected accounts
+        can_start = True
+        for acc_id in selected_accounts:
+            acc = get_account_by_id(settings, acc_id)
+            if not acc:
+                continue
+            selected_model = acc["ai_model"]
+            g = settings["global"]
             has_key = False
-            if "gpt" in selected_model and st.session_state.settings["openai_api_key"]:
+            if "gpt" in selected_model and g.get("openai_api_key"):
                 has_key = True
-            elif "gemini" in selected_model and st.session_state.settings["gemini_api_key"]:
+            elif "gemini" in selected_model and g.get("gemini_api_key"):
                 has_key = True
-            elif "deepseek" in selected_model and st.session_state.settings["deepseek_api_key"]:
+            elif "deepseek" in selected_model and g.get("deepseek_api_key"):
                 has_key = True
-            
             if not has_key:
-                st.error(f"Please enter the API key for your selected model ({selected_model}) in Settings.")
-            elif not os.path.exists("x_profile"):
-                st.error("Please setup X Session first.")
-            else:
-                st.session_state.is_running = True
-                st.session_state.status_text = "Starting..."
-                
-                # Start bot in thread
-                st.session_state.bot = XBot(
-                    api_key=st.session_state.settings["openai_api_key"],
-                    gemini_api_key=st.session_state.settings["gemini_api_key"],
-                    deepseek_api_key=st.session_state.settings["deepseek_api_key"],
-                    deepseek_base_url=st.session_state.settings["deepseek_base_url"],
-                    model=st.session_state.settings["ai_model"],
-                    max_posts=st.session_state.settings["max_posts_scan"],
-                    max_comments=st.session_state.settings["max_comments_post"],
-                    view_threshold=st.session_state.settings["view_threshold"],
-                    comment_strategy=st.session_state.settings["comment_strategy"],
-                    min_comment_views=st.session_state.settings["min_comment_views"],
-                    custom_prompt=st.session_state.settings["custom_prompt"],
+                st.error(f"Missing API key for {acc['name']} (model: {selected_model})")
+                can_start = False
+
+        if can_start:
+            st.session_state.is_running = True
+            ctx = get_script_run_ctx()
+
+            for acc_id in selected_accounts:
+                acc = get_account_by_id(settings, acc_id)
+                g = settings["global"]
+
+                bot = XBot(
+                    api_key=g.get("openai_api_key", ""),
+                    gemini_api_key=g.get("gemini_api_key", ""),
+                    deepseek_api_key=g.get("deepseek_api_key", ""),
+                    deepseek_base_url=g.get("deepseek_base_url", ""),
+                    model=acc["ai_model"],
+                    max_posts=acc["max_posts_scan"],
+                    max_comments=acc["max_comments_post"],
+                    view_threshold=acc["view_threshold"],
+                    comment_strategy=acc["comment_strategy"],
+                    min_comment_views=acc["min_comment_views"],
+                    custom_prompt=acc["custom_prompt"],
+                    premium_only=acc["premium_only"],
+                    account_id=acc["id"],
+                    account_name=acc["name"],
                 )
-                
-                def run_bot():
+                st.session_state.account_bots[acc_id] = bot
+                st.session_state.account_status[acc_id] = "Starting..."
+
+                callback = make_status_callback(acc_id, acc["name"])
+
+                def run_bot(b=bot, cb=callback, aid=acc_id):
                     try:
-                        st.session_state.bot.run(update_status)
+                        b.run(cb)
+                    except Exception as e:
+                        cb(f"❌ Fatal error: {e}")
                     finally:
-                        st.session_state.is_running = False
-                        st.session_state.status_text = "Finished"
-                
-                ctx = get_script_run_ctx()
-                thread = threading.Thread(target=run_bot)
+                        st.session_state.account_status[aid] = "Finished"
+
+                thread = threading.Thread(target=run_bot, daemon=True)
                 add_script_run_ctx(thread, ctx)
                 thread.start()
-    else:
-        if st.button("🛑 Stop Automation", width="stretch"):
-            st.session_state.is_running = False
-            if "bot" in st.session_state:
-                st.session_state.bot.stop_requested = True
-            st.info("Stopping... (will finish current task)")
+                st.session_state.account_threads[acc_id] = thread
 
-    st.metric("Status", st.session_state.status_text)
-    st.progress(st.session_state.progress)
+            st.rerun()
 
-with col2:
-    st.subheader("Live Logs")
+with col_stop:
+    if st.button("🛑 Stop All Accounts", disabled=not any_running, use_container_width=True):
+        for acc_id, bot in st.session_state.account_bots.items():
+            bot.stop_requested = True
+        st.info("Stopping all accounts... (will finish current tasks)")
+
+# ------------------------------------------------------------------
+# Live Logs
+# ------------------------------------------------------------------
+st.divider()
+col_log, col_status = st.columns([2, 1])
+
+with col_log:
+    st.subheader("📋 Live Logs")
     if st.session_state.logs:
-        with st.container(height=340, border=True):
+        with st.container(height=400, border=True):
             for entry in reversed(st.session_state.logs):
                 st.markdown(
                     f"<small style='color:#888'>{entry['Time']}</small>&nbsp;&nbsp;{entry['Message']}",
@@ -215,31 +361,56 @@ with col2:
     else:
         st.info("No logs yet. Start the bot to see activity.")
 
-st.divider()
+with col_status:
+    st.subheader("📊 Account Status")
+    for acc in settings["accounts"]:
+        aid = acc["id"]
+        status = st.session_state.account_status.get(aid, "Idle")
+        is_alive = aid in st.session_state.account_threads and st.session_state.account_threads[aid].is_alive()
+        icon = "🟢" if is_alive else ("✅" if status == "Finished" else "⚪")
+        st.markdown(f"{icon} **{acc['name']}**: {status}")
 
+# ------------------------------------------------------------------
 # Results Gallery
+# ------------------------------------------------------------------
+st.divider()
 st.subheader("📊 Interaction History")
 
 tab1, tab2 = st.tabs(["📜 History", "🔍 Check Post Variants"])
 
 with tab1:
-    history = get_history()
+    # Filter by account
+    filter_options = ["All Accounts"] + [f"{a['name']} ({a['id']})" for a in settings["accounts"]]
+    filter_ids = [None] + [a["id"] for a in settings["accounts"]]
+    filter_idx = st.selectbox("Filter by Account", range(len(filter_options)), format_func=lambda i: filter_options[i])
+    selected_filter_id = filter_ids[filter_idx]
+
+    history = get_history(account_id=selected_filter_id)
     if history:
-        history_df = pd.DataFrame(history, columns=["ID", "Timestamp", "Post URL", "Comment", "Status", "Views"])
-        st.dataframe(history_df, width="stretch")
+        history_df = pd.DataFrame(history, columns=["ID", "Timestamp", "Post URL", "Comment", "Status", "Views", "Account ID"])
+        
+        # Map Account ID to Account Name for display
+        account_map = {a["id"]: a["name"] for a in settings["accounts"]}
+        history_df["Account"] = history_df["Account ID"].map(lambda x: account_map.get(x, x))
+        
+        # Reorder and hide ID column if desired, or just show both. 
+        # Let's replace the column.
+        cols = ["ID", "Timestamp", "Account", "Post URL", "Comment", "Status", "Views"]
+        history_df = history_df[cols]
+        
+        st.dataframe(history_df, use_container_width=True)
     else:
-        st.info("No successful interactions yet.")
+        st.info("No interactions yet.")
 
 with tab2:
     st.markdown("### 🔎 Check Comment Status by URL")
     search_url = st.text_input("Enter Post URL to check variants:", placeholder="https://x.com/username/status/...")
-    
+
     if search_url:
-        from db_manager import get_variants_for_url
         variants = get_variants_for_url(search_url)
         if variants:
             st.success(f"Found {len(variants)} variants for this post.")
-            
+
             # Format data for display
             v_data = []
             for v in variants:
@@ -252,14 +423,18 @@ with tab2:
                     "Posted At": v["posted_at"] or "-",
                     "Views at Posting": f"{v['post_views']:,}" if v["post_views"] else "-"
                 })
-            
+
             st.table(v_data)
         else:
             st.warning("No generated variants found for this URL in the database.")
     else:
         st.info("Enter a URL above to see the status of its 5 generated AI replies.")
 
-# Auto-refresh UI
-if st.session_state.is_running:
+# Auto-refresh UI while any bot is running
+any_still_running = any(
+    t.is_alive() for t in st.session_state.account_threads.values()
+) if st.session_state.account_threads else False
+
+if any_still_running:
     time.sleep(2)
     st.rerun()

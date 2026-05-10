@@ -15,7 +15,8 @@ def init_db():
             post_url TEXT,
             comment_content TEXT,
             status TEXT,
-            views INTEGER
+            views INTEGER,
+            account_id TEXT DEFAULT 'default'
         )
     """)
 
@@ -30,45 +31,84 @@ def init_db():
             reply_text TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             posted_at DATETIME,
-            post_views INTEGER
+            post_views INTEGER,
+            account_id TEXT DEFAULT 'default'
         )
     """)
-    # Index for fast lookups by post URL
+    # Commit table creation FIRST so PRAGMA table_info can see the tables
+    conn.commit()
+
+    # --- Migration: add account_id column if missing (existing DBs) ---
+    # IMPORTANT: Run migrations BEFORE creating indexes on account_id
+    _migrate_add_account_id(cursor, "interactions")
+    _migrate_add_account_id(cursor, "post_variants")
+
+    # Index for fast lookups by post URL and account
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_variants_url
         ON post_variants (post_url)
     """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_variants_account
+        ON post_variants (account_id)
+    """)
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_interactions_account
+        ON interactions (account_id)
+    """)
 
     conn.commit()
     conn.close()
+
+
+def _migrate_add_account_id(cursor, table_name):
+    """Add account_id column to an existing table if it doesn't exist yet."""
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "account_id" not in columns:
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN account_id TEXT DEFAULT 'default'")
+
 
 # ---------------------------------------------------------------------------
 # Interaction log helpers
 # ---------------------------------------------------------------------------
 
-def log_interaction(post_url, comment_content, status, views):
+def log_interaction(post_url, comment_content, status, views, account_id="default"):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO interactions (timestamp, post_url, comment_content, status, views)
-        VALUES (?, ?, ?, ?, ?)
-    """, (datetime.now(), post_url, comment_content, status, views))
+        INSERT INTO interactions (timestamp, post_url, comment_content, status, views, account_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (datetime.now(), post_url, comment_content, status, views, account_id))
     conn.commit()
     conn.close()
 
-def get_history():
+def get_history(account_id=None):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM interactions ORDER BY timestamp DESC")
+    if account_id:
+        cursor.execute(
+            "SELECT id, timestamp, post_url, comment_content, status, views, account_id "
+            "FROM interactions WHERE account_id = ? ORDER BY timestamp DESC",
+            (account_id,)
+        )
+    else:
+        cursor.execute(
+            "SELECT id, timestamp, post_url, comment_content, status, views, account_id "
+            "FROM interactions ORDER BY timestamp DESC"
+        )
     rows = cursor.fetchall()
     conn.close()
     return rows
 
-def get_posted_urls():
+def get_posted_urls(account_id="default"):
     """Return a set of post URLs that have already been successfully replied to."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT post_url FROM interactions WHERE status = 'Success'")
+    cursor.execute(
+        "SELECT post_url FROM interactions WHERE status = 'Success' AND account_id = ?",
+        (account_id,)
+    )
     urls = {row[0] for row in cursor.fetchall()}
     conn.close()
     return urls
@@ -77,25 +117,28 @@ def get_posted_urls():
 # Reply-variant helpers
 # ---------------------------------------------------------------------------
 
-def save_reply_variants(post_url: str, variants: list[str]) -> None:
+def save_reply_variants(post_url: str, variants: list[str], account_id: str = "default") -> None:
     """
     Persist all generated reply variants (up to 5) for a post.
-    Existing variants for the same URL are replaced.
+    Existing variants for the same URL and account are replaced.
     """
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Clear any previous variants for this post (re-generation scenario)
-    cursor.execute("DELETE FROM post_variants WHERE post_url = ?", (post_url,))
+    # Clear any previous variants for this post + account (re-generation scenario)
+    cursor.execute(
+        "DELETE FROM post_variants WHERE post_url = ? AND account_id = ?",
+        (post_url, account_id)
+    )
     now = datetime.now()
     for idx, text in enumerate(variants[:5]):
         cursor.execute("""
-            INSERT INTO post_variants (post_url, variant_index, reply_text, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (post_url, idx, text, now))
+            INSERT INTO post_variants (post_url, variant_index, reply_text, created_at, account_id)
+            VALUES (?, ?, ?, ?, ?)
+        """, (post_url, idx, text, now, account_id))
     conn.commit()
     conn.close()
 
-def get_next_variant(post_url: str) -> dict | None:
+def get_next_variant(post_url: str, account_id: str = "default") -> dict | None:
     """
     Return the lowest-index variant that has not yet been posted,
     or None if all variants have been posted / none exist.
@@ -106,10 +149,10 @@ def get_next_variant(post_url: str) -> dict | None:
     cursor.execute("""
         SELECT id, variant_index, reply_text
         FROM post_variants
-        WHERE post_url = ? AND posted_at IS NULL
+        WHERE post_url = ? AND posted_at IS NULL AND account_id = ?
         ORDER BY variant_index ASC
         LIMIT 1
-    """, (post_url,))
+    """, (post_url, account_id))
     row = cursor.fetchone()
     conn.close()
     if row:
@@ -128,16 +171,24 @@ def mark_variant_posted(variant_id: int, post_views: int) -> None:
     conn.commit()
     conn.close()
 
-def get_variants_for_url(post_url: str) -> list[dict]:
+def get_variants_for_url(post_url: str, account_id: str = None) -> list[dict]:
     """Return all stored variants for a post URL, ordered by variant_index."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, variant_index, reply_text, created_at, posted_at, post_views
-        FROM post_variants
-        WHERE post_url = ?
-        ORDER BY variant_index ASC
-    """, (post_url,))
+    if account_id:
+        cursor.execute("""
+            SELECT id, variant_index, reply_text, created_at, posted_at, post_views
+            FROM post_variants
+            WHERE post_url = ? AND account_id = ?
+            ORDER BY variant_index ASC
+        """, (post_url, account_id))
+    else:
+        cursor.execute("""
+            SELECT id, variant_index, reply_text, created_at, posted_at, post_views
+            FROM post_variants
+            WHERE post_url = ?
+            ORDER BY variant_index ASC
+        """, (post_url,))
     rows = cursor.fetchall()
     conn.close()
     return [
@@ -148,7 +199,7 @@ def get_variants_for_url(post_url: str) -> list[dict]:
         for r in rows
     ]
 
-def get_posts_with_pending_variants() -> list[str]:
+def get_posts_with_pending_variants(account_id: str = "default") -> list[str]:
     """
     Return a list of distinct post URLs that have at least one un-posted variant
     (posted_at IS NULL), ordered by the variant's creation time (oldest first).
@@ -159,14 +210,14 @@ def get_posts_with_pending_variants() -> list[str]:
     cursor.execute("""
         SELECT DISTINCT post_url
         FROM post_variants
-        WHERE posted_at IS NULL
+        WHERE posted_at IS NULL AND account_id = ?
         ORDER BY created_at ASC
-    """)
+    """, (account_id,))
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
 
-def get_post_url_by_variant_text(reply_text: str) -> str | None:
+def get_post_url_by_variant_text(reply_text: str, account_id: str = "default") -> str | None:
     """
     Search for a reply text in post_variants to find its parent post_url.
     This is used as a fallback when the UI doesn't provide a direct link.
@@ -176,10 +227,9 @@ def get_post_url_by_variant_text(reply_text: str) -> str | None:
     # Use LIKE for minor whitespace differences, or exact match
     cursor.execute("""
         SELECT post_url FROM post_variants 
-        WHERE reply_text = ? OR reply_text LIKE ?
+        WHERE (reply_text = ? OR reply_text LIKE ?) AND account_id = ?
         LIMIT 1
-    """, (reply_text, f"%{reply_text}%"))
+    """, (reply_text, f"%{reply_text}%", account_id))
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else None
-
