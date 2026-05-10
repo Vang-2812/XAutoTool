@@ -23,6 +23,20 @@ STATE_FILE = "state.json"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
 
 
+def gaussian_sleep(mean: float, sigma: float, min_val: float = 1.0) -> None:
+    """
+    Sleep for a duration drawn from a normal (Gaussian) distribution.
+    Much more human-like than uniform random.randint.
+    
+    Args:
+        mean: Average seconds to wait.
+        sigma: Standard deviation (spread). Larger = more varied.
+        min_val: Floor — never sleep less than this.
+    """
+    duration = max(min_val, random.gauss(mean, sigma))
+    time.sleep(duration)
+
+
 class ModalDetectedException(Exception):
     """Raised when an X modal (like 'Views' popup) blocks the UI."""
     pass
@@ -65,6 +79,61 @@ class XBot:
         # Load already-replied URLs from DB to avoid duplicates (scoped to this account)
         self.replied_urls = set(get_posted_urls(account_id=self.account_id))
  
+    def _do_human_actions(self, page, status_callback=None) -> None:
+        """
+        Perform random passive human-like actions to break behavioral patterns.
+        Each action has a probability weight — not all run every call.
+        """
+        try:
+            actions = random.choices(
+                ["scroll_down", "scroll_up", "hover", "pause"],
+                weights=[40, 15, 25, 20],
+                k=random.randint(1, 3)
+            )
+            for action in actions:
+                if self.stop_requested:
+                    break
+                if action == "scroll_down":
+                    amount = random.randint(200, 700)
+                    page.evaluate(f"window.scrollBy(0, {amount})")
+                    gaussian_sleep(1.2, 0.4, 0.5)
+                elif action == "scroll_up":
+                    amount = random.randint(100, 400)
+                    page.evaluate(f"window.scrollBy(0, -{amount})")
+                    gaussian_sleep(0.9, 0.3, 0.4)
+                elif action == "hover":
+                    # Hover over a random article without clicking
+                    articles = page.query_selector_all('article')
+                    if articles:
+                        target = random.choice(articles[:5])
+                        try:
+                            target.hover()
+                            gaussian_sleep(1.0, 0.5, 0.3)
+                        except Exception:
+                            pass
+                elif action == "pause":
+                    # Just pause — simulates reading
+                    gaussian_sleep(2.5, 1.0, 1.0)
+        except Exception as e:
+            logger.debug(f"Human action error (non-critical): {e}")
+
+    def _try_like_post(self, page, article_el) -> bool:
+        """
+        Attempt to like a post by clicking the Like button inside an article element.
+        Returns True if the like action was performed, False otherwise.
+        Only clicks if the post is NOT already liked (to avoid unlike).
+        """
+        try:
+            like_btn = article_el.query_selector('[data-testid="like"]')
+            if like_btn and like_btn.is_visible():
+                like_btn.click()
+                gaussian_sleep(0.8, 0.3, 0.4)
+                logger.info("Liked a post (random human action).")
+                return True
+        except Exception as e:
+            logger.debug(f"Like action failed (non-critical): {e}")
+        return False
+
     def _handle_modals(self, page, skip_on_detect=False):
         """Check for and dismiss common X modals (like the 'Views' info popup)."""
         try:
@@ -376,7 +445,7 @@ OUTPUT FORMAT — follow EXACTLY:
         if view_count == 0:
             analytics_link = article.query_selector('a[href*="/analytics"]')
             if analytics_link:
-                aria = analytics_link.get_attribute("aria-label") or ""
+                aria = article.query_selector('a[href*="/analytics"]').get_attribute("aria-label") or ""
                 match = re.search(r"([\d,.]+[KMkm]?)\s*view", aria, re.IGNORECASE)
                 if match:
                     view_count = self._parse_count_string(match.group(1))
@@ -894,11 +963,10 @@ OUTPUT FORMAT — follow EXACTLY:
             status_callback("❌ Could not find reply input box on post page.")
             log_interaction(post_url, reply_text, "Reply Box Not Found", int(view_count), account_id=self.account_id)
 
-        # Wait before navigating away (human-like behavior)
+        # Wait before navigating away — Gaussian for human-like distribution
         if reply_posted:
-            wait_time = random.randint(15, 30)
-            status_callback(f"⏳ Waiting {wait_time}s before next action (anti-detection)...")
-            time.sleep(wait_time)
+            gaussian_sleep(22, 6, 10)
+            status_callback("⏳ Waiting before next action (anti-detection)...")
 
         return reply_posted
 
@@ -1142,15 +1210,22 @@ OUTPUT FORMAT — follow EXACTLY:
             status_callback("⏳ Waiting for timeline to load...")
             try:
                 page.wait_for_selector('article', timeout=15000)
-                time.sleep(2)
+                gaussian_sleep(3.0, 1.0, 2.0)
             except Exception:
                 status_callback("⚠️ Timeline took long to load, proceeding anyway...")
+
+            # Warm-up: do a few human-like actions before starting to comment
+            status_callback("🧘 Warming up session (simulating human browsing)...")
+            self._do_human_actions(page, status_callback)
+            gaussian_sleep(4.0, 1.5, 2.0)
 
             comments_posted = 0
             posts_scanned = 0
             scroll_count = 0
             max_scrolls = self.max_posts * 3  # Allow enough scrolling to find posts
             no_new_posts_count = 0
+            posts_since_human_action = 0
+            human_action_interval = random.randint(5, 10)  # Trigger every 5-10 posts
 
             status_callback(f"🚀 Starting scan. Target: {self.max_posts} posts, {self.max_comments} comments, min views: {self.view_threshold:,}")
 
@@ -1193,6 +1268,14 @@ OUTPUT FORMAT — follow EXACTLY:
                         self.processed_urls.add(post_url)
                         new_posts_found += 1
                         posts_scanned += 1
+                        posts_since_human_action += 1
+
+                        # Periodically do human actions every 5-10 posts
+                        if posts_since_human_action >= human_action_interval:
+                            status_callback(f"🧘 [{posts_scanned}/{self.max_posts}] Taking a human-like break...")
+                            self._do_human_actions(page, status_callback)
+                            posts_since_human_action = 0
+                            human_action_interval = random.randint(5, 10)  # Randomize next interval
 
                         # Skip if already replied to (from DB)
                         if post_url in self.replied_urls:
@@ -1218,11 +1301,26 @@ OUTPUT FORMAT — follow EXACTLY:
                         preview = tweet_content[:60].replace("\n", " ")
 
                         if view_count < self.view_threshold:
+                            # 20% chance: like this post randomly even if below threshold
+                            if random.random() < 0.20:
+                                if self._try_like_post(page, post):
+                                    status_callback(
+                                        f"👍 [{posts_scanned}/{self.max_posts}] "
+                                        f"Liked a post randomly (human behavior)."
+                                    )
                             status_callback(
                                 f"👁️ [{posts_scanned}/{self.max_posts}] "
                                 f"\"{preview}...\" — {view_count:,} views (below {self.view_threshold:,} threshold)"
                             )
                             continue
+
+                        # 20% chance: like the qualifying post before (or instead of) commenting
+                        if random.random() < 0.20:
+                            if self._try_like_post(page, post):
+                                status_callback(
+                                    f"👍 [{posts_scanned}/{self.max_posts}] "
+                                    f"Liked qualifying post randomly (human behavior)."
+                                )
                         
                         # Check for Premium Account if enabled
                         if self.premium_only:
