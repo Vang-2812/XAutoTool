@@ -309,7 +309,7 @@ OUTPUT FORMAT — follow EXACTLY:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=100
+                max_tokens=1500
             )
             return response.choices[0].message.content.strip().replace('"', '')
         elif "gemini" in self.model:
@@ -319,11 +319,17 @@ OUTPUT FORMAT — follow EXACTLY:
             )
             return response.text.strip().replace('"', '')
         elif "deepseek" in self.model:
-            response = self.deepseek_client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=100
-            )
+            kwargs = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+            # Official DeepSeek Reasoner uses max_completion_tokens instead of max_tokens
+            if "reasoner" in self.model:
+                kwargs["max_completion_tokens"] = 2000
+            else:
+                kwargs["max_tokens"] = 1500
+                
+            response = self.deepseek_client.chat.completions.create(**kwargs)
             return response.choices[0].message.content.strip().replace('"', '')
         return None
 

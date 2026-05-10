@@ -35,7 +35,7 @@ def _default_global():
         "openai_api_key": "",
         "gemini_api_key": "",
         "deepseek_api_key": "",
-        "deepseek_base_url": "https://ds2api-peach-two.vercel.app/v1",
+        "deepseek_base_url": "https://api.deepseek.com",
     }
 
 

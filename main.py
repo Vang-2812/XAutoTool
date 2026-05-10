@@ -166,7 +166,7 @@ with st.sidebar:
 
     acc_name = st.text_input("Account Name", value=acc["name"], key=f"name_{acc['id']}")
 
-    models = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "deepseek-v4-flash", "deepseek-v4-pro"]
+    models = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]
     current_model = acc.get("ai_model", "gpt-4o-mini")
     model_index = models.index(current_model) if current_model in models else 1
     model = st.selectbox("AI Model", models, index=model_index, key=f"model_{acc['id']}")

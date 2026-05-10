@@ -6,7 +6,7 @@ XAuto is a robust, multi-account automation tool for X (formerly Twitter). It le
 
 - **👥 Multi-Account Management**: Add, remove, and configure multiple X accounts independently.
 - **🚀 Concurrent Execution**: Run multiple bot instances in parallel using multi-threading.
-- **🤖 Advanced AI Integration**: Support for Gemini 2.0/2.5, GPT-4o, and DeepSeek v4 models.
+- **🤖 Advanced AI Integration**: Support for Gemini 2.0/2.5, GPT-4o, and official DeepSeek (v4, chat, reasoner) models.
 - **📈 Engagement-Driven Strategies**:
   - **Reply to Post**: Direct AI response based on tweet content.
   - **Mimic Top Comments**: Blends in by matching the tone of high-performing replies.
