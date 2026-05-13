@@ -1116,8 +1116,16 @@ OUTPUT FORMAT — follow EXACTLY:
                         
                     processed_reply_urls.add(reply_url)
                     new_found += 1
-                    
-                    status_callback(f"🔍 [Re-Reply] Processing reply: ...{reply_url[-20:]}")
+
+                    # CRITICAL: Only process tweets authored by the logged-in user.
+                    # The /with_replies page renders BOTH the original post (by another user)
+                    # AND your reply as separate <article> elements. Without this guard,
+                    # the code would read the ORIGINAL POST's view count (potentially millions)
+                    # and misidentify it as "your reply has enough views" → posting incorrectly.
+                    if f"/{username}/" not in reply_url:
+                        continue
+
+                    status_callback(f"🔍 [Re-Reply] Checking reply: ...{reply_url[-20:]}")
 
                     # Derive the original post URL.
                     # A reply tweet URL looks like: https://x.com/user/status/ID
@@ -1237,6 +1245,315 @@ OUTPUT FORMAT — follow EXACTLY:
             time.sleep(random.uniform(2, 3))
 
         return comments_posted
+
+    # ------------------------------------------------------------------
+    # Plan execution
+    # ------------------------------------------------------------------
+
+    def _apply_step_settings(self, step: dict):
+        """Reconfigure this bot instance with settings from a plan step."""
+        self.comment_strategy = step.get("strategy", self.comment_strategy)
+        self.model = step.get("ai_model", self.model)
+        self.max_posts = step.get("max_posts_scan", self.max_posts)
+        self.max_comments = step.get("max_comments_post", self.max_comments)
+        self.view_threshold = step.get("view_threshold", self.view_threshold)
+        self.min_comment_views = step.get("min_comment_views", self.min_comment_views)
+        self.premium_only = step.get("premium_only", self.premium_only)
+        self.skip_sponsored = step.get("skip_sponsored", self.skip_sponsored)
+        self.custom_prompt = step.get("custom_prompt", self.custom_prompt)
+
+        # Re-initialise AI client if the model family changed
+        model = self.model
+        if "gpt" in model and not hasattr(self, "client"):
+            import openai as _openai
+            self.client = _openai.OpenAI(api_key=self.api_key)
+        elif "gemini" in model and not hasattr(self, "gemini_client"):
+            import google.genai as _genai
+            self.gemini_client = _genai.Client(api_key=self.gemini_api_key)
+        elif "deepseek" in model and not hasattr(self, "deepseek_client"):
+            import openai as _openai
+            self.deepseek_client = _openai.OpenAI(
+                api_key=self.deepseek_api_key,
+                base_url=self.deepseek_base_url,
+            )
+
+        # Reset per-run tracking so each step starts fresh
+        self.processed_urls = set()
+        self.replied_urls = set(get_posted_urls(account_id=self.account_id))
+
+    def _run_single_strategy(self, page, status_callback):
+        """Execute the currently configured strategy on the given page.
+        
+        Reuses the core logic from run() but without browser setup/teardown.
+        Returns (posts_scanned, comments_posted).
+        """
+        # Navigate to timeline
+        status_callback("🌐 Navigating to X timeline...")
+        page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=30000)
+
+        # Wait for timeline
+        try:
+            page.wait_for_selector('article', timeout=15000)
+            gaussian_sleep(3.0, 1.0, 2.0)
+        except Exception:
+            status_callback("⚠️ Timeline took long to load, proceeding anyway...")
+
+        # Warm-up
+        self._do_human_actions(page, status_callback)
+        gaussian_sleep(2.0, 1.0, 1.0)
+
+        comments_posted = 0
+        posts_scanned = 0
+        scroll_count = 0
+        max_scrolls = self.max_posts * 3
+        no_new_posts_count = 0
+        posts_since_human_action = 0
+        human_action_interval = random.randint(5, 10)
+
+        status_callback(
+            f"🚀 Starting scan. Strategy: {self.comment_strategy} | "
+            f"Target: {self.max_posts} posts, {self.max_comments} comments, min views: {self.view_threshold:,}"
+        )
+
+        # Special case: Re-Reply operates on Replies tab
+        if self.comment_strategy == "Re-Reply to Post":
+            posted = self._re_reply_to_posts(page, status_callback)
+            status_callback(f"🏁 [Re-Reply] Step done! Posted {posted} queued variant(s).")
+            return 0, posted
+
+        while (posts_scanned < self.max_posts and
+               comments_posted < self.max_comments and
+               not self.stop_requested and
+               scroll_count < max_scrolls):
+
+            scroll_count += 1
+            posts = page.query_selector_all("article")
+            new_posts_found = 0
+
+            for post in posts:
+                if self.stop_requested or comments_posted >= self.max_comments:
+                    break
+                try:
+                    post_url = self._extract_post_url(post)
+                    if not post_url:
+                        continue
+                    if post_url in self.processed_urls:
+                        continue
+
+                    self.processed_urls.add(post_url)
+                    new_posts_found += 1
+                    posts_scanned += 1
+                    posts_since_human_action += 1
+
+                    if posts_since_human_action >= human_action_interval:
+                        self._do_human_actions(page, status_callback)
+                        posts_since_human_action = 0
+                        human_action_interval = random.randint(5, 10)
+
+                    if post_url in self.replied_urls:
+                        continue
+
+                    post_text = post.inner_text()
+                    tweet_text_el = post.query_selector('[data-testid="tweetText"]')
+                    tweet_content = tweet_text_el.inner_text().strip() if tweet_text_el else ""
+
+                    if len(tweet_content) < 50:
+                        continue
+
+                    view_count = self._extract_view_count(page, post, post_text)
+                    preview = tweet_content[:60].replace("\n", " ")
+
+                    if view_count < self.view_threshold:
+                        if random.random() < 0.15:
+                            self._try_like_post(page, post)
+                        continue
+
+                    if random.random() < 0.15:
+                        self._try_like_post(page, post)
+
+                    if self.premium_only and not self._is_premium_account(post):
+                        continue
+                    if self.skip_sponsored and self._is_sponsored_post(post):
+                        continue
+
+                    status_callback(
+                        f"🎯 [{posts_scanned}/{self.max_posts}] "
+                        f"{view_count:,} views — \"{preview}...\""
+                    )
+
+                    new_page = page.context.new_page()
+                    Stealth().apply_stealth_sync(new_page)
+                    success = False
+                    try:
+                        if self.comment_strategy == "Mimic Top Comments":
+                            success = self._mimic_top_comment_and_reply(new_page, post_url, tweet_content, view_count, status_callback)
+                        elif self.comment_strategy == "Reply if Latest Comment Active":
+                            success = self._reply_if_latest_comment_active(new_page, post_url, tweet_content, view_count, status_callback)
+                        else:
+                            success = self._enter_post_and_reply(new_page, post_url, tweet_content, view_count, status_callback)
+                    except ModalDetectedException:
+                        success = False
+                    except Exception:
+                        pass
+                    finally:
+                        new_page.close()
+
+                    if success:
+                        comments_posted += 1
+                        self.replied_urls.add(post_url)
+                        status_callback(f"📊 Progress: {comments_posted}/{self.max_comments} comments posted")
+
+                    time.sleep(random.uniform(1, 2))
+                except Exception as e:
+                    logger.error(f"Error processing post in plan step: {e}")
+                    continue
+
+            if new_posts_found == 0:
+                no_new_posts_count += 1
+                if no_new_posts_count >= 5:
+                    break
+            else:
+                no_new_posts_count = 0
+
+            scroll_amount = random.randint(600, 1200)
+            try:
+                page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+            except Exception as e:
+                if "closed" in str(e).lower():
+                    break
+            time.sleep(random.uniform(2, 4))
+
+        status_callback(
+            f"✅ Step done: scanned {posts_scanned} posts, posted {comments_posted} comments."
+        )
+        return posts_scanned, comments_posted
+
+    def run_plan(self, plan: dict, status_callback):
+        """Execute a full plan: multiple strategy steps with delays/scheduling.
+        
+        Reuses one browser context across all steps.
+        """
+        from datetime import datetime, timedelta
+
+        plan_name = plan.get("name", "Unnamed Plan")
+        steps = plan.get("steps", [])
+        if not steps:
+            status_callback(f"📋 Plan '{plan_name}' has no steps. Nothing to do.")
+            return
+
+        status_callback(f"📋 Starting plan: {plan_name} ({len(steps)} step(s))")
+
+        self._cleanup_profile()
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=self.user_data_dir,
+                headless=False,
+                channel="msedge",
+                ignore_default_args=["--enable-automation"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disk-cache-size=10485760",
+                    "--media-cache-size=10485760",
+                ],
+                user_agent=USER_AGENT,
+                viewport={'width': 1920, 'height': 1080},
+                locale="en-US"
+            )
+
+            page = context.pages[0] if context.pages else context.new_page()
+            Stealth().apply_stealth_sync(page)
+
+            # Initial login check
+            status_callback("🌐 Navigating to X...")
+            page.goto("https://x.com/home")
+            time.sleep(5)
+            if "login" in page.url:
+                status_callback("🔑 Not logged in. Please log in manually. You have 5 minutes.")
+                try:
+                    page.wait_for_timeout(300000)
+                except Exception:
+                    pass
+                if self.stop_requested:
+                    context.close()
+                    return
+
+            total_posted = 0
+
+            for idx, step in enumerate(steps):
+                if self.stop_requested:
+                    status_callback("🛑 Plan stopped by user.")
+                    break
+
+                step_num = idx + 1
+                strategy = step.get("strategy", "Reply to Post")
+                trigger = step.get("trigger", "delay")
+
+                # --- Wait for trigger ---
+                if idx > 0:  # First step always runs immediately
+                    if trigger == "delay":
+                        delay_min = step.get("delay_minutes", 0)
+                        if delay_min > 0:
+                            status_callback(
+                                f"⏳ [Step {step_num}/{len(steps)}] Waiting {delay_min} minute(s) before '{strategy}'..."
+                            )
+                            # Wait in 10s chunks so we can check stop_requested
+                            wait_end = time.time() + delay_min * 60
+                            while time.time() < wait_end and not self.stop_requested:
+                                time.sleep(min(10, wait_end - time.time()))
+                            if self.stop_requested:
+                                status_callback("🛑 Plan stopped during delay.")
+                                break
+
+                    elif trigger == "time":
+                        sched_time_str = step.get("scheduled_time", "")
+                        if sched_time_str:
+                            try:
+                                now = datetime.now()
+                                hour, minute = map(int, sched_time_str.split(":"))
+                                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                                # If target is already past today, schedule for tomorrow
+                                if target <= now:
+                                    target += timedelta(days=1)
+                                wait_secs = (target - now).total_seconds()
+                                status_callback(
+                                    f"⏰ [Step {step_num}/{len(steps)}] Scheduled at {sched_time_str}. "
+                                    f"Waiting {int(wait_secs // 60)} minute(s)..."
+                                )
+                                wait_end = time.time() + wait_secs
+                                while time.time() < wait_end and not self.stop_requested:
+                                    remaining = wait_end - time.time()
+                                    # Log remaining time every 5 minutes
+                                    if remaining > 300 and int(remaining) % 300 < 10:
+                                        status_callback(
+                                            f"⏰ [Step {step_num}] ~{int(remaining // 60)} min remaining until {sched_time_str}"
+                                        )
+                                    time.sleep(min(10, remaining))
+                                if self.stop_requested:
+                                    status_callback("🛑 Plan stopped during scheduled wait.")
+                                    break
+                            except (ValueError, AttributeError) as e:
+                                status_callback(f"⚠️ Invalid scheduled_time '{sched_time_str}': {e}. Running immediately.")
+
+                # --- Apply step settings & run strategy ---
+                status_callback(
+                    f"▶️ [Step {step_num}/{len(steps)}] Running strategy: {strategy}"
+                )
+                self._apply_step_settings(step)
+
+                try:
+                    _scanned, _posted = self._run_single_strategy(page, status_callback)
+                    total_posted += _posted
+                except Exception as e:
+                    status_callback(f"❌ [Step {step_num}] Error: {str(e)[:100]}")
+                    logger.error(f"Plan step {step_num} failed: {e}")
+
+            status_callback(
+                f"🏁 Plan '{plan_name}' finished! "
+                f"Executed {min(idx + 1, len(steps))}/{len(steps)} steps, "
+                f"posted {total_posted} total comments."
+            )
+            context.close()
 
     def run(self, status_callback):
         # Clean up heavy cache files before launching to save disk space

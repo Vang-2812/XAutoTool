@@ -9,7 +9,10 @@ from bot_engine import XBot, start_login_session
 from settings_manager import (
     load_settings, save_settings,
     add_account, remove_account, get_account_by_id,
-    get_profile_dir, ACCOUNT_SETTING_KEYS
+    get_profile_dir, ACCOUNT_SETTING_KEYS,
+    get_plans_for_account, add_plan, remove_plan, get_plan_by_id,
+    add_step_to_plan, remove_step_from_plan, make_step_from_account,
+    STEP_SETTING_KEYS,
 )
 from db_manager import init_db, get_history, get_variants_for_url
 import os
@@ -233,6 +236,7 @@ with st.sidebar:
         "custom_prompt": custom_prompt_val,
         "premium_only": premium_only,
         "skip_sponsored": skip_sponsored,
+        "plans": acc.get("plans", []),
     }
     if _updated_acc != acc:
         settings["accounts"][selected_idx] = _updated_acc
@@ -427,7 +431,7 @@ with col_status:
 st.divider()
 st.subheader("📊 Interaction History")
 
-tab1, tab2 = st.tabs(["📜 History", "🔍 Check Post Variants"])
+tab1, tab2, tab3 = st.tabs(["📜 History", "📋 Plans", "🔍 Check Post Variants"])
 
 with tab1:
     # Filter by account
@@ -444,8 +448,6 @@ with tab1:
         account_map = {a["id"]: a["name"] for a in settings["accounts"]}
         history_df["Account"] = history_df["Account ID"].map(lambda x: account_map.get(x, x))
         
-        # Reorder and hide ID column if desired, or just show both. 
-        # Let's replace the column.
         cols = ["ID", "Timestamp", "Account", "Post URL", "Comment", "Status", "Views"]
         history_df = history_df[cols]
         
@@ -453,7 +455,271 @@ with tab1:
     else:
         st.info("No interactions yet.")
 
+# ------------------------------------------------------------------
+# Tab 2: Plans
+# ------------------------------------------------------------------
 with tab2:
+    st.markdown("### 📋 Scheduling & Plan Setup")
+    st.caption(
+        "Create plans with multiple strategy steps. "
+        "Each step can have its own settings and a delay or scheduled time trigger."
+    )
+
+    # --- Select account for plan management ---
+    plan_acc_names = [f"{a['name']} ({a['id']})" for a in settings["accounts"]]
+    plan_acc_idx = st.selectbox(
+        "Account",
+        range(len(plan_acc_names)),
+        format_func=lambda i: plan_acc_names[i],
+        key="plan_account_select"
+    )
+    plan_acc = settings["accounts"][plan_acc_idx]
+    plan_acc_id = plan_acc["id"]
+
+    plans = get_plans_for_account(settings, plan_acc_id)
+
+    # --- Add Plan ---
+    col_plan_add, col_plan_spacer = st.columns([1, 3])
+    with col_plan_add:
+        if st.button("➕ New Plan", key="add_plan_btn", use_container_width=True):
+            new_plan = add_plan(settings, plan_acc_id, name=f"Plan {len(plans) + 1}")
+            st.session_state.settings = settings
+            st.rerun()
+
+    if not plans:
+        st.info("No plans yet for this account. Click **➕ New Plan** to create one.")
+    else:
+        for p_idx, plan in enumerate(plans):
+            plan_id = plan["id"]
+            is_plan_running = (
+                f"plan_{plan_acc_id}_{plan_id}" in st.session_state.account_threads
+                and st.session_state.account_threads[f"plan_{plan_acc_id}_{plan_id}"].is_alive()
+            )
+
+            with st.expander(
+                f"{'🟢' if is_plan_running else '📋'} {plan.get('name', 'Unnamed')} — "
+                f"{len(plan.get('steps', []))} step(s)",
+                expanded=(len(plans) == 1)
+            ):
+                # --- Plan header: name + controls ---
+                hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
+                with hcol1:
+                    new_plan_name = st.text_input(
+                        "Plan Name", value=plan.get("name", ""),
+                        key=f"pname_{plan_id}", label_visibility="collapsed"
+                    )
+                    if new_plan_name != plan.get("name"):
+                        plan["name"] = new_plan_name
+                        save_settings(settings)
+                with hcol2:
+                    if st.button(
+                        "▶️ Run" if not is_plan_running else "🔄 Running...",
+                        key=f"run_plan_{plan_id}",
+                        disabled=is_plan_running or not os.path.exists(get_profile_dir(plan_acc_id)),
+                        use_container_width=True
+                    ):
+                        # Launch plan in background thread
+                        g = settings["global"]
+                        bot = XBot(
+                            api_key=g.get("openai_api_key", ""),
+                            gemini_api_key=g.get("gemini_api_key", ""),
+                            deepseek_api_key=g.get("deepseek_api_key", ""),
+                            deepseek_base_url=g.get("deepseek_base_url", ""),
+                            model=plan_acc.get("ai_model", "gpt-4o-mini"),
+                            max_posts=plan_acc.get("max_posts_scan", 20),
+                            max_comments=plan_acc.get("max_comments_post", 5),
+                            view_threshold=plan_acc.get("view_threshold", 1000),
+                            comment_strategy=plan_acc.get("comment_strategy", "Reply to Post"),
+                            min_comment_views=plan_acc.get("min_comment_views", 1000),
+                            custom_prompt=plan_acc.get("custom_prompt", ""),
+                            premium_only=plan_acc.get("premium_only", False),
+                            skip_sponsored=plan_acc.get("skip_sponsored", False),
+                            account_id=plan_acc_id,
+                            account_name=plan_acc["name"],
+                        )
+                        thread_key = f"plan_{plan_acc_id}_{plan_id}"
+                        st.session_state.account_bots[thread_key] = bot
+                        st.session_state.account_status[thread_key] = "Starting plan..."
+
+                        cb = make_status_callback(thread_key, f"{plan_acc['name']}|{plan['name']}")
+
+                        def _run_plan(b=bot, p=plan, callback=cb, tk=thread_key):
+                            try:
+                                b.run_plan(p, callback)
+                            except Exception as e:
+                                callback(f"❌ Fatal plan error: {e}")
+                            finally:
+                                st.session_state.account_status[tk] = "Plan Finished"
+
+                        ctx = get_script_run_ctx()
+                        thread = threading.Thread(target=_run_plan, daemon=True)
+                        add_script_run_ctx(thread, ctx)
+                        thread.start()
+                        st.session_state.account_threads[thread_key] = thread
+                        st.rerun()
+
+                with hcol3:
+                    if is_plan_running:
+                        thread_key = f"plan_{plan_acc_id}_{plan_id}"
+                        if st.button("🛑 Stop", key=f"stop_plan_{plan_id}", use_container_width=True):
+                            bot = st.session_state.account_bots.get(thread_key)
+                            if bot:
+                                bot.stop_requested = True
+                            st.info("Stopping plan...")
+                    else:
+                        if st.button("🗑️ Delete", key=f"del_plan_{plan_id}", use_container_width=True):
+                            remove_plan(settings, plan_acc_id, plan_id)
+                            st.session_state.settings = settings
+                            st.rerun()
+
+                # Show plan running status
+                if is_plan_running:
+                    thread_key = f"plan_{plan_acc_id}_{plan_id}"
+                    status = st.session_state.account_status.get(thread_key, "")
+                    st.info(f"🔄 {status}")
+
+                st.markdown("---")
+
+                # --- Steps ---
+                steps = plan.get("steps", [])
+                strategies_list = ["Reply to Post", "Mimic Top Comments", "Reply if Latest Comment Active", "Re-Reply to Post"]
+                models_list = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]
+
+                plan_changed = False
+
+                for s_idx, step in enumerate(steps):
+                    step_key = f"{plan_id}_s{s_idx}"
+                    st.markdown(f"**Step {s_idx + 1}**")
+
+                    # Row 1: Strategy + Trigger
+                    c1, c2, c3, c4 = st.columns([2, 1, 1, 0.5])
+                    with c1:
+                        cur_strat = step.get("strategy", "Reply to Post")
+                        s_i = strategies_list.index(cur_strat) if cur_strat in strategies_list else 0
+                        new_strat = st.selectbox(
+                            "Strategy", strategies_list, index=s_i,
+                            key=f"strat_{step_key}", label_visibility="collapsed"
+                        )
+                        if new_strat != step.get("strategy"):
+                            step["strategy"] = new_strat
+                            plan_changed = True
+
+                    with c2:
+                        trigger_opts = ["delay", "time"]
+                        cur_trigger = step.get("trigger", "delay")
+                        t_i = trigger_opts.index(cur_trigger) if cur_trigger in trigger_opts else 0
+                        new_trigger = st.selectbox(
+                            "Trigger", trigger_opts, index=t_i,
+                            key=f"trigger_{step_key}",
+                            format_func=lambda x: "⏳ Delay" if x == "delay" else "⏰ Time",
+                            label_visibility="collapsed",
+                            disabled=(s_idx == 0)  # First step always runs immediately
+                        )
+                        if s_idx > 0 and new_trigger != step.get("trigger"):
+                            step["trigger"] = new_trigger
+                            plan_changed = True
+
+                    with c3:
+                        if s_idx == 0:
+                            st.caption("Runs immediately")
+                        elif new_trigger == "delay":
+                            new_delay = st.number_input(
+                                "Delay (min)", min_value=0, max_value=1440,
+                                value=step.get("delay_minutes", 0),
+                                key=f"delay_{step_key}", label_visibility="collapsed"
+                            )
+                            if int(new_delay) != step.get("delay_minutes"):
+                                step["delay_minutes"] = int(new_delay)
+                                plan_changed = True
+                        else:  # time
+                            from datetime import time as dt_time
+                            cur_time_str = step.get("scheduled_time", "00:00")
+                            try:
+                                h, m = map(int, cur_time_str.split(":"))
+                                cur_time_val = dt_time(h, m)
+                            except Exception:
+                                cur_time_val = dt_time(0, 0)
+                            new_time = st.time_input(
+                                "Time", value=cur_time_val,
+                                key=f"time_{step_key}", label_visibility="collapsed"
+                            )
+                            new_time_str = new_time.strftime("%H:%M")
+                            if new_time_str != step.get("scheduled_time"):
+                                step["scheduled_time"] = new_time_str
+                                plan_changed = True
+
+                    with c4:
+                        if st.button("✕", key=f"del_step_{step_key}", disabled=(len(steps) <= 1)):
+                            remove_step_from_plan(settings, plan_acc_id, plan_id, s_idx)
+                            st.session_state.settings = settings
+                            st.rerun()
+
+                    # Row 2: Collapsed per-step settings
+                    with st.expander(f"⚙️ Step {s_idx + 1} Settings", expanded=False):
+                        sc1, sc2 = st.columns(2)
+                        with sc1:
+                            cur_model = step.get("ai_model", "gpt-4o-mini")
+                            m_i = models_list.index(cur_model) if cur_model in models_list else 0
+                            s_model = st.selectbox("AI Model", models_list, index=m_i, key=f"smodel_{step_key}")
+                            if s_model != step.get("ai_model"):
+                                step["ai_model"] = s_model
+                                plan_changed = True
+
+                            s_max_posts = st.number_input("Max Posts", min_value=1, max_value=500, value=step.get("max_posts_scan", 20), key=f"smaxp_{step_key}")
+                            if int(s_max_posts) != step.get("max_posts_scan"):
+                                step["max_posts_scan"] = int(s_max_posts)
+                                plan_changed = True
+
+                            s_max_comments = st.number_input("Max Comments", min_value=1, max_value=100, value=step.get("max_comments_post", 5), key=f"smaxc_{step_key}")
+                            if int(s_max_comments) != step.get("max_comments_post"):
+                                step["max_comments_post"] = int(s_max_comments)
+                                plan_changed = True
+
+                        with sc2:
+                            s_view = st.number_input("View Threshold", min_value=0, value=step.get("view_threshold", 1000), key=f"sview_{step_key}")
+                            if int(s_view) != step.get("view_threshold"):
+                                step["view_threshold"] = int(s_view)
+                                plan_changed = True
+
+                            s_minv = st.number_input("Min Comment Views", min_value=0, value=step.get("min_comment_views", 1000), key=f"sminv_{step_key}")
+                            if int(s_minv) != step.get("min_comment_views"):
+                                step["min_comment_views"] = int(s_minv)
+                                plan_changed = True
+
+                            s_prem = st.checkbox("Premium Only", value=step.get("premium_only", False), key=f"sprem_{step_key}")
+                            if s_prem != step.get("premium_only"):
+                                step["premium_only"] = s_prem
+                                plan_changed = True
+
+                            s_skip = st.checkbox("Skip Sponsored", value=step.get("skip_sponsored", False), key=f"sskip_{step_key}")
+                            if s_skip != step.get("skip_sponsored"):
+                                step["skip_sponsored"] = s_skip
+                                plan_changed = True
+
+                        s_prompt = st.text_area("Custom Prompt", value=step.get("custom_prompt", ""), height=120, key=f"sprompt_{step_key}")
+                        if s_prompt != step.get("custom_prompt"):
+                            step["custom_prompt"] = s_prompt
+                            plan_changed = True
+
+                    if s_idx < len(steps) - 1:
+                        st.markdown("<div style='text-align:center;color:#888;font-size:1.2em'>⬇️</div>", unsafe_allow_html=True)
+
+                # --- Add Step button ---
+                if st.button("➕ Add Step", key=f"add_step_{plan_id}", use_container_width=True):
+                    # Pre-fill new step from account's current settings
+                    new_step = make_step_from_account(plan_acc)
+                    add_step_to_plan(settings, plan_acc_id, plan_id, overrides=new_step)
+                    st.session_state.settings = settings
+                    st.rerun()
+
+                # Save any inline changes
+                if plan_changed:
+                    save_settings(settings)
+
+# ------------------------------------------------------------------
+# Tab 3: Check Post Variants
+# ------------------------------------------------------------------
+with tab3:
     st.markdown("### 🔎 Check Comment Status by URL")
     search_url = st.text_input("Enter Post URL to check variants:", placeholder="https://x.com/username/status/...")
 
@@ -462,7 +728,6 @@ with tab2:
         if variants:
             st.success(f"Found {len(variants)} variants for this post.")
 
-            # Format data for display
             v_data = []
             for v in variants:
                 status = "✅ Used (Y)" if v["posted_at"] else "⏳ Not Used (N)"
