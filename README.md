@@ -21,8 +21,8 @@ XAuto is a robust, multi-account automation tool for X (formerly Twitter). It le
 
 ### 1. Clone & Setup
 ```bash
-git clone https://github.com/yourusername/XAuto.git
-cd XAuto
+git clone https://github.com/Vang-2812/XAutoTool.git
+cd XAutoTool
 pip install -r requirements.txt
 playwright install chromium
 ```
