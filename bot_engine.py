@@ -47,7 +47,7 @@ class XBot:
     def __init__(self, api_key, model, max_posts, max_comments, view_threshold,
                  gemini_api_key=None, deepseek_api_key=None, deepseek_base_url=None,
                  comment_strategy="Reply to Post", min_comment_views=1000, custom_prompt="",
-                 premium_only=False, account_id="default", account_name="Account"):
+                 premium_only=False, skip_sponsored=False, account_id="default", account_name="Account"):
         self.api_key = api_key
         self.gemini_api_key = gemini_api_key
         self.deepseek_api_key = deepseek_api_key
@@ -60,6 +60,7 @@ class XBot:
         self.min_comment_views = min_comment_views
         self.custom_prompt = custom_prompt
         self.premium_only = premium_only
+        self.skip_sponsored = skip_sponsored
         self.account_id = account_id
         self.account_name = account_name
         self.user_data_dir = get_profile_dir(account_id)
@@ -439,6 +440,40 @@ OUTPUT FORMAT — follow EXACTLY:
                     if label and "Verified" in label:
                         return True
             
+            return False
+        except Exception:
+            return False
+
+    def _is_sponsored_post(self, post):
+        """Detect if a post article is a sponsored/advertisement post."""
+        try:
+            # Strategy 1: X marks promoted posts with data-testid="placementTracking"
+            if post.query_selector('[data-testid="placementTracking"]'):
+                return True
+
+            # Strategy 2: Look for the "Ad" label that X injects into promoted tweets.
+            # It usually appears as a span with aria-label="Ad" or visible text "Ad".
+            ad_label = post.query_selector('[aria-label="Ad"]')
+            if ad_label:
+                return True
+
+            # Strategy 3: Parse inner text — X renders a small "Ad" badge as a standalone
+            # word inside the user-name / social-context area.
+            social_context = post.query_selector('[data-testid="socialContext"]')
+            if social_context:
+                ctx_text = social_context.inner_text().strip()
+                if ctx_text.lower() in ("ad", "promoted"):
+                    return True
+
+            # Strategy 4: scan all direct-child spans for an isolated "Ad" text node
+            user_name_el = post.query_selector('[data-testid="User-Name"]')
+            if user_name_el:
+                spans = user_name_el.query_selector_all('span')
+                for span in spans:
+                    txt = span.inner_text().strip()
+                    if txt == "Ad":
+                        return True
+
             return False
         except Exception:
             return False
@@ -1369,6 +1404,14 @@ OUTPUT FORMAT — follow EXACTLY:
                                     f"\"{preview}...\" — Not a Premium account, skipping."
                                 )
                                 continue
+
+                        # Skip sponsored / advertisement posts if enabled
+                        if self.skip_sponsored and self._is_sponsored_post(post):
+                            status_callback(
+                                f"⏭️ [{posts_scanned}/{self.max_posts}] "
+                                f"\"{preview}...\" — Sponsored post, skipping."
+                            )
+                            continue
 
                         # This post qualifies!
                         status_callback(

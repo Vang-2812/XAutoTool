@@ -21,6 +21,7 @@ _DEFAULT_ACCOUNT_SETTINGS = {
         "- Goal: maximize views (10k+) and shareability."
     ),
     "premium_only": False,
+    "skip_sponsored": False,
 }
 
 # Keys that belong to global (shared) config

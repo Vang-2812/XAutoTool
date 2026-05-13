@@ -157,6 +157,7 @@ with st.sidebar:
                 st.session_state[f"minviews_{aid}"] = acc["min_comment_views"]
                 st.session_state[f"prompt_{aid}"] = acc["custom_prompt"]
                 st.session_state[f"premium_{aid}"] = acc["premium_only"]
+                st.session_state[f"skip_sponsored_{aid}"] = acc.get("skip_sponsored", False)
 
                 # Update settings and save
                 settings["accounts"][selected_idx] = acc
@@ -176,6 +177,8 @@ with st.sidebar:
     view_threshold = st.number_input("Post View Threshold", min_value=0, value=acc.get("view_threshold", 1000), key=f"viewthresh_{acc['id']}")
     premium_only = st.checkbox("Premium Account Only", value=acc.get("premium_only", False), key=f"premium_{acc['id']}",
                                help="Only interact with posts from accounts with a verified badge.")
+    skip_sponsored = st.checkbox("Skip Sponsored Posts", value=acc.get("skip_sponsored", False), key=f"skip_sponsored_{acc['id']}",
+                                 help="Automatically skip posts marked as Ads or Promoted by X.")
 
     st.divider()
     st.markdown("**💬 Comment Strategy**")
@@ -229,6 +232,7 @@ with st.sidebar:
         "min_comment_views": int(min_comment_views),
         "custom_prompt": custom_prompt_val,
         "premium_only": premium_only,
+        "skip_sponsored": skip_sponsored,
     }
     if _updated_acc != acc:
         settings["accounts"][selected_idx] = _updated_acc
@@ -360,6 +364,7 @@ with col_start:
                     min_comment_views=acc["min_comment_views"],
                     custom_prompt=acc["custom_prompt"],
                     premium_only=acc["premium_only"],
+                    skip_sponsored=acc.get("skip_sponsored", False),
                     account_id=acc["id"],
                     account_name=acc["name"],
                 )
