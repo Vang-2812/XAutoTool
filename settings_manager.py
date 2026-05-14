@@ -202,6 +202,8 @@ def _make_plan(name: str = "New Plan") -> dict:
         "id": f"plan_{uuid.uuid4().hex[:8]}",
         "name": name,
         "enabled": True,
+        "loop_count": 1,
+        "loop_delay_minutes": 0,
         "steps": [_make_step()],
     }
 

@@ -1634,74 +1634,92 @@ OUTPUT FORMAT — follow EXACTLY:
                     return
 
             total_posted = 0
+            
+            loop_count = plan.get("loop_count", 1)
+            loop_delay_minutes = plan.get("loop_delay_minutes", 0)
 
-            for idx, step in enumerate(steps):
+            for current_loop in range(loop_count):
                 if self.stop_requested:
-                    status_callback("🛑 Plan stopped by user.")
                     break
+                    
+                if loop_count > 1:
+                    status_callback(f"🔄 Starting loop {current_loop + 1}/{loop_count}")
 
-                step_num = idx + 1
-                strategy = step.get("strategy", "Reply to Post")
-                trigger = step.get("trigger", "delay")
-
-                # --- Wait for trigger ---
-                if idx > 0:  # First step always runs immediately
-                    if trigger == "delay":
-                        delay_min = step.get("delay_minutes", 0)
-                        if delay_min > 0:
-                            status_callback(
-                                f"⏳ [Step {step_num}/{len(steps)}] Waiting {delay_min} minute(s) before '{strategy}'..."
-                            )
-                            # Wait in 10s chunks so we can check stop_requested
-                            wait_end = time.time() + delay_min * 60
-                            while time.time() < wait_end and not self.stop_requested:
-                                time.sleep(min(10, wait_end - time.time()))
-                            if self.stop_requested:
-                                status_callback("🛑 Plan stopped during delay.")
-                                break
-
-                    elif trigger == "time":
-                        sched_time_str = step.get("scheduled_time", "")
-                        if sched_time_str:
-                            try:
-                                now = datetime.now()
-                                hour, minute = map(int, sched_time_str.split(":"))
-                                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                                # If target is already past today, schedule for tomorrow
-                                if target <= now:
-                                    target += timedelta(days=1)
-                                wait_secs = (target - now).total_seconds()
+                for idx, step in enumerate(steps):
+                    if self.stop_requested:
+                        status_callback("🛑 Plan stopped by user.")
+                        break
+    
+                    step_num = idx + 1
+                    strategy = step.get("strategy", "Reply to Post")
+                    trigger = step.get("trigger", "delay")
+    
+                    # --- Wait for trigger ---
+                    if idx > 0:  # First step always runs immediately
+                        if trigger == "delay":
+                            delay_min = step.get("delay_minutes", 0)
+                            if delay_min > 0:
                                 status_callback(
-                                    f"⏰ [Step {step_num}/{len(steps)}] Scheduled at {sched_time_str}. "
-                                    f"Waiting {int(wait_secs // 60)} minute(s)..."
+                                    f"⏳ [Step {step_num}/{len(steps)}] Waiting {delay_min} minute(s) before '{strategy}'..."
                                 )
-                                wait_end = time.time() + wait_secs
+                                # Wait in 10s chunks so we can check stop_requested
+                                wait_end = time.time() + delay_min * 60
                                 while time.time() < wait_end and not self.stop_requested:
-                                    remaining = wait_end - time.time()
-                                    # Log remaining time every 5 minutes
-                                    if remaining > 300 and int(remaining) % 300 < 10:
-                                        status_callback(
-                                            f"⏰ [Step {step_num}] ~{int(remaining // 60)} min remaining until {sched_time_str}"
-                                        )
-                                    time.sleep(min(10, remaining))
+                                    time.sleep(min(10, wait_end - time.time()))
                                 if self.stop_requested:
-                                    status_callback("🛑 Plan stopped during scheduled wait.")
+                                    status_callback("🛑 Plan stopped during delay.")
                                     break
-                            except (ValueError, AttributeError) as e:
-                                status_callback(f"⚠️ Invalid scheduled_time '{sched_time_str}': {e}. Running immediately.")
-
-                # --- Apply step settings & run strategy ---
-                status_callback(
-                    f"▶️ [Step {step_num}/{len(steps)}] Running strategy: {strategy}"
-                )
-                self._apply_step_settings(step)
-
-                try:
-                    _scanned, _posted = self._run_single_strategy(page, status_callback)
-                    total_posted += _posted
-                except Exception as e:
-                    status_callback(f"❌ [Step {step_num}] Error: {str(e)[:100]}")
-                    logger.error(f"Plan step {step_num} failed: {e}")
+    
+                        elif trigger == "time":
+                            sched_time_str = step.get("scheduled_time", "")
+                            if sched_time_str:
+                                try:
+                                    now = datetime.now()
+                                    hour, minute = map(int, sched_time_str.split(":"))
+                                    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                                    # If target is already past today, schedule for tomorrow
+                                    if target <= now:
+                                        target += timedelta(days=1)
+                                    wait_secs = (target - now).total_seconds()
+                                    status_callback(
+                                        f"⏰ [Step {step_num}/{len(steps)}] Scheduled at {sched_time_str}. "
+                                        f"Waiting {int(wait_secs // 60)} minute(s)..."
+                                    )
+                                    wait_end = time.time() + wait_secs
+                                    while time.time() < wait_end and not self.stop_requested:
+                                        remaining = wait_end - time.time()
+                                        # Log remaining time every 5 minutes
+                                        if remaining > 300 and int(remaining) % 300 < 10:
+                                            status_callback(
+                                                f"⏰ [Step {step_num}] ~{int(remaining // 60)} min remaining until {sched_time_str}"
+                                            )
+                                        time.sleep(min(10, remaining))
+                                    if self.stop_requested:
+                                        status_callback("🛑 Plan stopped during scheduled wait.")
+                                        break
+                                except (ValueError, AttributeError) as e:
+                                    status_callback(f"⚠️ Invalid scheduled_time '{sched_time_str}': {e}. Running immediately.")
+    
+                    # --- Apply step settings & run strategy ---
+                    status_callback(
+                        f"▶️ [Step {step_num}/{len(steps)}] Running strategy: {strategy}"
+                    )
+                    self._apply_step_settings(step)
+    
+                    try:
+                        _scanned, _posted = self._run_single_strategy(page, status_callback)
+                        total_posted += _posted
+                    except Exception as e:
+                        status_callback(f"❌ [Step {step_num}] Error: {str(e)[:100]}")
+                        logger.error(f"Plan step {step_num} failed: {e}")
+                
+                # Delay between plan loops
+                if current_loop < loop_count - 1 and not self.stop_requested:
+                    if loop_delay_minutes > 0:
+                        status_callback(f"⏳ Loop {current_loop + 1} finished. Waiting {loop_delay_minutes} minute(s) before next loop...")
+                        wait_end = time.time() + loop_delay_minutes * 60
+                        while time.time() < wait_end and not self.stop_requested:
+                            time.sleep(min(10, wait_end - time.time()))
 
             status_callback(
                 f"🏁 Plan '{plan_name}' finished! "

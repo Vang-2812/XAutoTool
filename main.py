@@ -582,6 +582,23 @@ with tab2:
                     status = st.session_state.account_status.get(thread_key, "")
                     st.info(f"🔄 {status}")
 
+                lcol1, lcol2 = st.columns(2)
+                with lcol1:
+                    new_loop_count = st.number_input(
+                        "🔁 Plan Loop Iterations", min_value=1, value=plan.get("loop_count", 1),
+                        key=f"loop_{plan_id}"
+                    )
+                with lcol2:
+                    new_loop_delay = st.number_input(
+                        "⏳ Delay Between Loops (mins)", min_value=0, value=plan.get("loop_delay_minutes", 0),
+                        key=f"loop_delay_{plan_id}"
+                    )
+                
+                if new_loop_count != plan.get("loop_count", 1) or new_loop_delay != plan.get("loop_delay_minutes", 0):
+                    plan["loop_count"] = new_loop_count
+                    plan["loop_delay_minutes"] = new_loop_delay
+                    save_settings(settings)
+
                 st.markdown("---")
 
                 # --- Steps ---
