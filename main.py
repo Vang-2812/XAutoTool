@@ -179,9 +179,11 @@ with st.sidebar:
     max_comments = st.number_input("Max Comments to Post", min_value=1, max_value=100, value=acc.get("max_comments_post", 5), key=f"maxcomments_{acc['id']}")
     view_threshold = st.number_input("Post View Threshold", min_value=0, value=acc.get("view_threshold", 1000), key=f"viewthresh_{acc['id']}")
     premium_only = st.checkbox("Premium Account Only", value=acc.get("premium_only", False), key=f"premium_{acc['id']}",
-                               help="Only interact with posts from accounts with a verified badge.")
+                               help="Only comment on posts from verified (blue badge) accounts.")
     skip_sponsored = st.checkbox("Skip Sponsored Posts", value=acc.get("skip_sponsored", False), key=f"skip_sponsored_{acc['id']}",
-                                 help="Automatically skip posts marked as Ads or Promoted by X.")
+                                 help="Ignore posts that are marked as Ads or Promoted.")
+    auto_follow_high_ratio = st.checkbox("Auto-follow if Following/Follower ratio ≥ 80%", value=acc.get("auto_follow_high_ratio", False), key=f"auto_follow_{acc['id']}",
+                                         help="Opens post owner profile, follows if Following count >= 80% of Followers count.")
 
     st.divider()
     st.markdown("**💬 Comment Strategy**")
@@ -236,6 +238,7 @@ with st.sidebar:
         "custom_prompt": custom_prompt_val,
         "premium_only": premium_only,
         "skip_sponsored": skip_sponsored,
+        "auto_follow_high_ratio": auto_follow_high_ratio,
         "plans": acc.get("plans", []),
     }
     if _updated_acc != acc:
@@ -369,6 +372,7 @@ with col_start:
                     custom_prompt=acc["custom_prompt"],
                     premium_only=acc["premium_only"],
                     skip_sponsored=acc.get("skip_sponsored", False),
+                    auto_follow_high_ratio=acc.get("auto_follow_high_ratio", False),
                     account_id=acc["id"],
                     account_name=acc["name"],
                 )
@@ -694,6 +698,11 @@ with tab2:
                             s_skip = st.checkbox("Skip Sponsored", value=step.get("skip_sponsored", False), key=f"sskip_{step_key}")
                             if s_skip != step.get("skip_sponsored"):
                                 step["skip_sponsored"] = s_skip
+                                plan_changed = True
+                                
+                            s_follow = st.checkbox("Auto-follow (≥80% ratio)", value=step.get("auto_follow_high_ratio", False), key=f"sfollow_{step_key}")
+                            if s_follow != step.get("auto_follow_high_ratio"):
+                                step["auto_follow_high_ratio"] = s_follow
                                 plan_changed = True
 
                         s_prompt = st.text_area("Custom Prompt", value=step.get("custom_prompt", ""), height=120, key=f"sprompt_{step_key}")

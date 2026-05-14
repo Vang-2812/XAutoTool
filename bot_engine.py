@@ -47,7 +47,8 @@ class XBot:
     def __init__(self, api_key, model, max_posts, max_comments, view_threshold,
                  gemini_api_key=None, deepseek_api_key=None, deepseek_base_url=None,
                  comment_strategy="Reply to Post", min_comment_views=1000, custom_prompt="",
-                 premium_only=False, skip_sponsored=False, account_id="default", account_name="Account"):
+                 premium_only=False, skip_sponsored=False, auto_follow_high_ratio=False, 
+                 account_id="default", account_name="Account"):
         self.api_key = api_key
         self.gemini_api_key = gemini_api_key
         self.deepseek_api_key = deepseek_api_key
@@ -61,6 +62,7 @@ class XBot:
         self.custom_prompt = custom_prompt
         self.premium_only = premium_only
         self.skip_sponsored = skip_sponsored
+        self.auto_follow_high_ratio = auto_follow_high_ratio
         self.account_id = account_id
         self.account_name = account_name
         self.user_data_dir = get_profile_dir(account_id)
@@ -422,26 +424,61 @@ OUTPUT FORMAT — follow EXACTLY:
         return view_count
     
     def _is_premium_account(self, post):
-        """Check if the post author has a verified (premium) badge."""
+        """Check if the post author has a verified (premium) BLUE badge, ignoring Gold/Gray."""
         try:
-            # X uses data-testid="icon-verified" for blue/gold/grey ticks
+            # X uses data-testid="icon-verified" for all verification ticks
             verified_icon = post.query_selector('[data-testid="icon-verified"]')
+            
+            if not verified_icon:
+                # Fallback check for SVGs that might indicate verification inside User-Name
+                user_name_container = post.query_selector('[data-testid="User-Name"]')
+                if user_name_container:
+                    for svg in user_name_container.query_selector_all('svg'):
+                        label = svg.get_attribute("aria-label") or ""
+                        if "verified" in label.lower():
+                            verified_icon = svg
+                            break
+
             if verified_icon:
-                return True
-            
-            # Fallback check for SVG paths or aria-labels that might indicate verification
-            # The badge is usually inside the user name container
-            user_name_container = post.query_selector('[data-testid="User-Name"]')
-            if user_name_container:
-                # Look for SVGs that might be the badge if data-testid is missing/changed
-                svgs = user_name_container.query_selector_all('svg')
-                for svg in svgs:
-                    label = svg.get_attribute("aria-label")
-                    if label and "Verified" in label:
-                        return True
-            
+                # Use JavaScript to inspect the computed fill style of the badge's SVG path.
+                # Why? X uses the exact same aria-label ("Verified account") for all badge colors!
+                # - Blue (Premium): path fill is explicitly blue (e.g. rgb(29, 155, 240)) or theme color.
+                # - Gold (Business): path fill is a gradient (url(#...))
+                # - Gray (Government): path fill is explicitly gray (rgb(130, 154, 171))
+                is_premium_blue = verified_icon.evaluate('''el => {
+                    const path = el.querySelector('path');
+                    if (!path) return false;
+                    
+                    const fill = window.getComputedStyle(path).fill || "";
+                    
+                    // Reject Gold badges (they use a gradient fill)
+                    if (fill.includes("url(")) return false;
+                    
+                    // Parse RGB to detect Gray badges across all X themes (Dark/Dim/Light)
+                    const match = fill.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+                    if (match) {
+                        const r = parseInt(match[1]);
+                        const g = parseInt(match[2]);
+                        const b = parseInt(match[3]);
+                        
+                        // Calculate color vibrancy (difference between highest and lowest RGB channels)
+                        const max = Math.max(r, g, b);
+                        const min = Math.min(r, g, b);
+                        
+                        // Premium badges use vibrant theme colors (Blue, Pink, Yellow) -> High difference.
+                        // Gray badges (and black/white) lack color saturation -> Low difference.
+                        if (max - min < 50) {
+                            return false; // It is a shade of gray
+                        }
+                        
+                        return true; // Vibrant color -> Standard Premium account
+                    }
+                    return false;
+                }''')
+                return is_premium_blue
+                
             return False
-        except Exception:
+        except Exception as e:
             return False
 
     def _is_sponsored_post(self, post):
@@ -477,6 +514,109 @@ OUTPUT FORMAT — follow EXACTLY:
             return False
         except Exception:
             return False
+
+    def _handle_auto_follow(self, page, post_url, status_callback):
+        """Check if we can reply, and if auto-follow is enabled, execute the follow logic."""
+        if not getattr(self, 'auto_follow_high_ratio', False):
+            return True
+            
+        # 1. Verify that the post allows replies
+        can_reply = False
+        try:
+            # Check for the reply area
+            page.wait_for_selector('div[data-testid="reply"], div[data-testid="tweetTextarea_0"]', timeout=5000)
+            can_reply = True
+        except Exception:
+            pass
+            
+        if not can_reply:
+            status_callback("⏭️ [Auto-Follow] Cannot find reply box. Post might have disabled replies.")
+            return False
+
+        # Extract username from post_url
+        match = re.search(r"https://x\.com/([^/]+)/status/\d+", post_url)
+        if not match:
+            return True
+            
+        username = match.group(1)
+        # Skip following ourselves
+        if username.lower() == getattr(self, 'username', '').lower() or username.lower() == self.account_name.lower():
+            return True
+
+        profile_url = f"https://x.com/{username}"
+        status_callback(f"👤 [Auto-Follow] Checking profile for @{username}...")
+        
+        # Open profile in a NEW TAB
+        new_page = page.context.new_page()
+        try:
+            new_page.goto(profile_url, wait_until="domcontentloaded", timeout=20000)
+            new_page.wait_for_selector('[data-testid="UserName"]', timeout=10000)
+            time.sleep(2)
+            
+            # Check if already following
+            is_following = new_page.evaluate('''() => {
+                const btns = Array.from(document.querySelectorAll('[data-testid$="-unfollow"]'));
+                if (btns.length > 0) return true;
+                const txtBtns = Array.from(document.querySelectorAll('[role="button"]'));
+                return txtBtns.some(b => b.innerText.trim() === "Following");
+            }''')
+            
+            if is_following:
+                status_callback(f"👤 [Auto-Follow] Already following @{username}.")
+                return True
+                
+            follow_btn = new_page.query_selector('[data-testid$="-follow"]')
+            if not follow_btn:
+                # Fallback to finding button by text
+                btn_by_text = new_page.evaluate_handle('''() => {
+                    const btns = Array.from(document.querySelectorAll('[role="button"]'));
+                    return btns.find(b => b.innerText.trim() === "Follow") || null;
+                }''')
+                if btn_by_text:
+                    follow_btn = btn_by_text.as_element()
+                    
+            if not follow_btn:
+                status_callback(f"⚠️ [Auto-Follow] Could not find Follow button for @{username}.")
+                return True
+                
+            # Not following. Check following/follower ratio.
+            counts_text = new_page.evaluate('''() => {
+                let following = "0";
+                let followers = "0";
+                const followingEl = document.querySelector('a[href$="/following"]');
+                if (followingEl) {
+                    const span = followingEl.querySelector('span');
+                    if (span) following = span.innerText;
+                    else following = followingEl.innerText.split(' ')[0];
+                }
+                const followerEl = document.querySelector('a[href$="/followers"], a[href$="/verified_followers"]');
+                if (followerEl) {
+                    const span = followerEl.querySelector('span');
+                    if (span) followers = span.innerText;
+                    else followers = followerEl.innerText.split(' ')[0];
+                }
+                return {following, followers};
+            }''')
+            
+            following_count = self._parse_count_string(counts_text["following"])
+            follower_count = self._parse_count_string(counts_text["followers"])
+            
+            status_callback(f"📊 [Auto-Follow] @{username}: {following_count:,} following, {follower_count:,} followers.")
+            
+            if follower_count > 0 and following_count >= (0.8 * follower_count):
+                status_callback(f"✨ [Auto-Follow] Ratio >= 80%. Following @{username}...")
+                follow_btn.click()
+                time.sleep(2)
+            else:
+                status_callback(f"⏭️ [Auto-Follow] Ratio < 80%. Not following.")
+                
+        except Exception as e:
+            logger.warning(f"Auto-follow check failed for {username}: {e}")
+        finally:
+            new_page.close()
+            time.sleep(1)
+            
+        return True
 
     def _parse_count_string(self, count_str):
         """Parse a count string like '1.2K', '3M', '12,345' into an integer."""
@@ -579,6 +719,11 @@ OUTPUT FORMAT — follow EXACTLY:
         # Check for modals immediately after loading
         self._handle_modals(page, skip_on_detect=True)
 
+        # Run auto-follow logic before generating replies
+        if not self._handle_auto_follow(page, post_url, status_callback):
+            status_callback("❌ Cannot reply to this post (comments restricted).")
+            return False
+
         # Generate 5 variants AFTER successful navigation
         status_callback(f"💬 Generating 5 AI reply variants for post with {view_count:,} views...")
         reply_text, variant_id = self._generate_and_get_variant(post_url, "reply", post_text)
@@ -608,6 +753,10 @@ OUTPUT FORMAT — follow EXACTLY:
         # Check for modals immediately after loading
         self._handle_modals(page, skip_on_detect=True)
 
+        # Run auto-follow logic before generating replies
+        if not self._handle_auto_follow(page, post_url, status_callback):
+            status_callback("❌ Cannot reply to this post (comments restricted).")
+            return False
 
         # Scrape top comments
         status_callback(f"🔍 Scanning comments (min {self.min_comment_views:,} likes)...")
@@ -654,6 +803,11 @@ OUTPUT FORMAT — follow EXACTLY:
 
         # Check for modals immediately after loading
         self._handle_modals(page, skip_on_detect=True)
+
+        # Run auto-follow logic before generating replies
+        if not self._handle_auto_follow(page, post_url, status_callback):
+            status_callback("❌ Cannot reply to this post (comments restricted).")
+            return False
 
 
         # Switch to "Recent" sort order.
@@ -1260,6 +1414,7 @@ OUTPUT FORMAT — follow EXACTLY:
         self.min_comment_views = step.get("min_comment_views", self.min_comment_views)
         self.premium_only = step.get("premium_only", self.premium_only)
         self.skip_sponsored = step.get("skip_sponsored", self.skip_sponsored)
+        self.auto_follow_high_ratio = step.get("auto_follow_high_ratio", getattr(self, 'auto_follow_high_ratio', False))
         self.custom_prompt = step.get("custom_prompt", self.custom_prompt)
 
         # Re-initialise AI client if the model family changed

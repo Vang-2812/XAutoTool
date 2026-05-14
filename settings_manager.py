@@ -22,6 +22,7 @@ _DEFAULT_ACCOUNT_SETTINGS = {
     ),
     "premium_only": False,
     "skip_sponsored": False,
+    "auto_follow_high_ratio": False,
 }
 
 # Default settings for a single plan step
@@ -37,6 +38,7 @@ _DEFAULT_STEP_SETTINGS = {
     "min_comment_views": 1000,
     "premium_only": False,
     "skip_sponsored": False,
+    "auto_follow_high_ratio": False,
     "custom_prompt": (
         "- Each reply ≤ 310 characters.\n"
         "- Replies must be in the SAME LANGUAGE as the post / comments provided.\n"
@@ -269,5 +271,6 @@ def make_step_from_account(acc: dict) -> dict:
         "min_comment_views": acc.get("min_comment_views", 1000),
         "premium_only": acc.get("premium_only", False),
         "skip_sponsored": acc.get("skip_sponsored", False),
+        "auto_follow_high_ratio": acc.get("auto_follow_high_ratio", False),
         "custom_prompt": acc.get("custom_prompt", ""),
     })
